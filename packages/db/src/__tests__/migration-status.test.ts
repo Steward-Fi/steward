@@ -115,6 +115,8 @@ describe("migration ledger readiness", () => {
       [first, required, malformedHash],
       [first, required, duplicateTimestamp],
       [first, nonForwardUnknown, required],
+      [required, first],
+      [first, required, unknownForward, knownForward],
     ]) {
       expect(assessMigrationLedger(applied, [first, required]).ok).toBe(false);
       expect(assessMigrationLedger(applied, [first, required]).state).toBe("corrupt");

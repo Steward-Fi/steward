@@ -57,6 +57,12 @@ function sameMigration(a: MigrationLedgerEntry, b: MigrationLedgerEntry): boolea
   return a.hash === b.hash && a.createdAt === b.createdAt;
 }
 
+function isStrictlyForward(entries: readonly MigrationLedgerEntry[]): boolean {
+  return entries.every(
+    (entry, index) => index === 0 || entry.createdAt > (entries[index - 1]?.createdAt ?? 0),
+  );
+}
+
 /**
  * Validate the applied core migration ledger against the migrations required by
  * this release. Required migrations must be present with their exact hash and
@@ -97,25 +103,20 @@ export function assessMigrationLedger(
   const hasDuplicateCreatedAt = [normalizedApplied, normalizedRequired, normalizedKnown].some(
     (entries) => new Set(entries.map((entry) => entry.createdAt)).size !== entries.length,
   );
-  if (hasDuplicateCreatedAt) {
+  const hasNonForwardOrder = [normalizedApplied, normalizedRequired, normalizedKnown].some(
+    (entries) => !isStrictlyForward(entries),
+  );
+  if (hasDuplicateCreatedAt || hasNonForwardOrder) {
     return { ok: false, state: "corrupt", ...base };
   }
 
-  const appliedByCreatedAt = new Map(
-    normalizedApplied.map((entry) => [entry.createdAt, entry] as const),
+  const missingRequired = normalizedRequired.find(
+    (entry, index) => !normalizedApplied[index] || !sameMigration(normalizedApplied[index], entry),
   );
-  const missingRequired = normalizedRequired.find((entry) => {
-    const appliedEntry = appliedByCreatedAt.get(entry.createdAt);
-    return !appliedEntry || !sameMigration(appliedEntry, entry);
-  });
   if (missingRequired) {
-    const knownByCreatedAt = new Map(
-      normalizedKnown.map((entry) => [entry.createdAt, entry] as const),
+    const onlyValidKnownPrefix = normalizedApplied.every(
+      (entry, index) => normalizedKnown[index] && sameMigration(entry, normalizedKnown[index]),
     );
-    const onlyValidKnownPrefix = normalizedApplied.every((entry) => {
-      const knownEntry = knownByCreatedAt.get(entry.createdAt);
-      return knownEntry !== undefined && sameMigration(entry, knownEntry);
-    });
     const actualTip = Math.max(0, ...normalizedApplied.map((entry) => entry.createdAt));
     const requiredTip = Math.max(...normalizedRequired.map((entry) => entry.createdAt));
     return {
@@ -129,13 +130,10 @@ export function assessMigrationLedger(
     return { ok: true, state: "exact", ...base };
   }
 
-  const requiredCreatedAt = new Set(normalizedRequired.map((entry) => entry.createdAt));
   const knownByCreatedAt = new Map(
     normalizedKnown.map((entry) => [entry.createdAt, entry] as const),
   );
-  const forwardEntries = normalizedApplied.filter(
-    (entry) => !requiredCreatedAt.has(entry.createdAt),
-  );
+  const forwardEntries = normalizedApplied.slice(normalizedRequired.length);
   const unknownForwardEntries = forwardEntries.filter((entry) => {
     const knownEntry = knownByCreatedAt.get(entry.createdAt);
     return knownEntry === undefined || !sameMigration(entry, knownEntry);
