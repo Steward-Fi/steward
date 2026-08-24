@@ -32,7 +32,7 @@ describe("passkey MFA hardening", () => {
       "getChallengeStore().consume(challengeKey)",
       handlerStart,
     );
-    const counterUpdate = authSource.indexOf(".set({ counter:", handlerStart);
+    const counterUpdate = authSource.indexOf(".update(authenticators)", handlerStart);
     const mfaMethod = authSource.indexOf('mfaMethod: "passkey"', handlerStart);
 
     expect(readChallenge).toBeGreaterThan(handlerStart);
@@ -51,7 +51,7 @@ describe("passkey MFA hardening", () => {
     const mfaStart = authSource.indexOf("const completePasskeyMfaHandler");
     expect(mfaStart).toBeGreaterThanOrEqual(0);
     const mfaGuard = authSource.indexOf(guard, mfaStart);
-    const mfaCounterUpdate = authSource.indexOf(".set({ counter:", mfaStart);
+    const mfaCounterUpdate = authSource.indexOf(".update(authenticators)", mfaStart);
     const mfaCompareAndSwap = authSource.indexOf(
       "eq(authenticators.counter, cred.counter)",
       mfaCounterUpdate,
@@ -63,7 +63,7 @@ describe("passkey MFA hardening", () => {
     const loginStart = authSource.indexOf('auth.post("/passkey/login/verify"');
     expect(loginStart).toBeGreaterThanOrEqual(0);
     const loginGuard = authSource.indexOf(guard, loginStart);
-    const loginCounterUpdate = authSource.indexOf(".set({ counter:", loginStart);
+    const loginCounterUpdate = authSource.indexOf(".update(authenticators)", loginStart);
     const loginCompareAndSwap = authSource.indexOf(
       "eq(authenticators.counter, cred.counter)",
       loginCounterUpdate,

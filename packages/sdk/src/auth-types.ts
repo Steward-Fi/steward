@@ -182,6 +182,13 @@ export interface StewardEmailGrantResult {
   expiresInSeconds: number;
 }
 
+/** Stable server payload for verified-email recovery on an existing RP passkey. */
+export interface StewardPasskeyAlreadyRegisteredErrorData {
+  ok: false;
+  error: string;
+  code: "passkey_already_registered";
+}
+
 export interface StewardTestAccountLoginOptions {
   tenantId?: string;
   email?: string;
