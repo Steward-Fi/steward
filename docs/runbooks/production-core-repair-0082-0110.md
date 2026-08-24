@@ -280,9 +280,9 @@ Before production authorization:
    running its migrator. Repeat health, readiness, providers, email/passkey
    session creation, refresh, and chat-write probes. Require the exact legacy
    provider resume shape to fail at the 0084 fence without changing the row.
-5. Start the exact candidate image as the green deployment on the same repaired
-   clone. Prove an evidence-bearing provider resume and execution, then apply
-   the separately reviewed 0111–0114 schema-aware bundle and require full
+5. Apply the separately reviewed 0111–0114 schema-aware bundle to the repaired
+   clone, then start the exact candidate image as the green deployment. Prove
+   an evidence-bearing provider resume and execution and require full
    `/health`, `/ready`, auth, provider, and migration receipts.
 6. Return to the old image once, with provider execution still drained, and
    repeat only the accepted rollback-scope probes. Generate the external JSON

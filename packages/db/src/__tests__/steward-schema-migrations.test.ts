@@ -155,6 +155,27 @@ async function createFixture(executor: StewardSchemaMigrationExecutor, schema: s
   await executor.unsafe(fixtureTables);
 }
 
+async function getBootstrapFunctionDefinition(
+  executor: StewardSchemaMigrationExecutor,
+  name: string,
+): Promise<string> {
+  const rows = await executor.unsafe<{ definition: string }>(
+    `
+      SELECT pg_get_functiondef(procedure.oid) AS definition
+      FROM pg_proc procedure
+      JOIN pg_namespace namespace ON namespace.oid = procedure.pronamespace
+      WHERE namespace.nspname = 'steward_bootstrap'
+        AND procedure.proname = $1::text
+      ORDER BY procedure.oid
+    `,
+    [name],
+  );
+  if (rows.length !== 1 || !rows[0]?.definition) {
+    throw new Error(`expected one bootstrap function definition for ${name}`);
+  }
+  return rows[0].definition;
+}
+
 async function assertInstalled(
   executor: StewardSchemaMigrationExecutor,
   schema: string,
@@ -301,7 +322,8 @@ describe("Steward-owned schema compatibility migration", () => {
         });
         await assertInstalled(adapter, schema);
 
-        await expect(inspectStewardSchemaMigrations({ client: adapter })).resolves.toEqual({
+        const inspection = await inspectStewardSchemaMigrations({ client: adapter });
+        expect(inspection).toEqual({
           status: "ready",
           schema,
           expectedCount: 2,
@@ -349,6 +371,102 @@ describe("Steward-owned schema compatibility migration", () => {
       `);
       await expect(inspectStewardSchemaMigrations({ client: adapter })).rejects.toThrow(
         /auth_tenant_config_subject.*source/,
+      );
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("readiness rejects an implicit PUBLIC grant on a recreated definer function", async () => {
+    const client = new PGlite("memory://");
+    const adapter = pgliteAdapter(client);
+    try {
+      await createFixture(adapter, "public");
+      await runStewardSchemaMigrations({ client: adapter, useAdvisoryLock: false });
+      const definition = await getBootstrapFunctionDefinition(
+        adapter,
+        "auth_tenant_config_subject",
+      );
+      await adapter.unsafe("DROP FUNCTION steward_bootstrap.auth_tenant_config_subject(text)");
+      await adapter.unsafe(definition);
+
+      await expect(inspectStewardSchemaMigrations({ client: adapter })).rejects.toThrow(
+        /auth_tenant_config_subject.*ACL/,
+      );
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("readiness rejects changed bootstrap argument defaults", async () => {
+    const client = new PGlite("memory://");
+    const adapter = pgliteAdapter(client);
+    try {
+      await createFixture(adapter, "public");
+      await runStewardSchemaMigrations({ client: adapter, useAdvisoryLock: false });
+      const definition = await getBootstrapFunctionDefinition(adapter, "auth_tenant_subject");
+      const rebound = definition.replace(
+        /DEFAULT\s+NULL(?:::[a-z_][a-z0-9_]*)?/i,
+        "DEFAULT '00000000-0000-4000-8000-000000000099'::uuid",
+      );
+      expect(rebound).not.toBe(definition);
+      await adapter.unsafe(rebound);
+
+      await expect(inspectStewardSchemaMigrations({ client: adapter })).rejects.toThrow(
+        /auth_tenant_subject.*argument defaults/,
+      );
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("readiness rejects changed bootstrap input signatures and overloads", async () => {
+    const client = new PGlite("memory://");
+    const adapter = pgliteAdapter(client);
+    try {
+      await createFixture(adapter, "public");
+      await runStewardSchemaMigrations({ client: adapter, useAdvisoryLock: false });
+      const definition = await getBootstrapFunctionDefinition(adapter, "tenant_api_key_subject");
+      const rebound = definition.replace("p_tenant_id text", "p_tenant_id character varying");
+      expect(rebound).not.toBe(definition);
+      await adapter.unsafe("DROP FUNCTION steward_bootstrap.tenant_api_key_subject(text)");
+      await adapter.unsafe(rebound);
+
+      await expect(inspectStewardSchemaMigrations({ client: adapter })).rejects.toThrow(
+        /tenant_api_key_subject.*arguments/,
+      );
+
+      await adapter.unsafe(`
+        CREATE FUNCTION steward_bootstrap.tenant_api_key_subject(p_tenant_id integer)
+        RETURNS TABLE (tenant_id varchar(64), api_key_hash text)
+        LANGUAGE sql
+        STABLE
+        SECURITY DEFINER
+        SET search_path = pg_catalog
+        AS $$ SELECT NULL::varchar(64), NULL::text WHERE false $$
+      `);
+      await expect(inspectStewardSchemaMigrations({ client: adapter })).rejects.toThrow(
+        /tenant_api_key_subject.*identity/,
+      );
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("readiness rejects changed bootstrap result signatures", async () => {
+    const client = new PGlite("memory://");
+    const adapter = pgliteAdapter(client);
+    try {
+      await createFixture(adapter, "public");
+      await runStewardSchemaMigrations({ client: adapter, useAdvisoryLock: false });
+      const definition = await getBootstrapFunctionDefinition(adapter, "tenant_api_key_subject");
+      const rebound = definition.replace("id character varying", "resolved_id character varying");
+      expect(rebound).not.toBe(definition);
+      await adapter.unsafe("DROP FUNCTION steward_bootstrap.tenant_api_key_subject(text)");
+      await adapter.unsafe(rebound);
+
+      await expect(inspectStewardSchemaMigrations({ client: adapter })).rejects.toThrow(
+        /tenant_api_key_subject.*result/,
       );
     } finally {
       await client.close();
@@ -577,6 +695,7 @@ describe("Steward-owned schema compatibility migration", () => {
 const postgresUrl = process.env.DATABASE_URL;
 const postgresDescribe = postgresUrl ? describe : describe.skip;
 const postgresDatabases: string[] = [];
+const postgresRoles: string[] = [];
 
 postgresDescribe("Steward-owned schema compatibility migration on real Postgres", () => {
   const originalUrl = postgresUrl ?? "postgres://unused.invalid/postgres";
@@ -588,6 +707,9 @@ postgresDescribe("Steward-owned schema compatibility migration on real Postgres"
   afterAll(async () => {
     for (const database of postgresDatabases) {
       await admin.unsafe(`DROP DATABASE IF EXISTS "${database}" WITH (FORCE)`);
+    }
+    for (const role of postgresRoles) {
+      await admin.unsafe(`DROP ROLE IF EXISTS "${role}"`);
     }
     await admin.end();
   });
@@ -668,6 +790,22 @@ postgresDescribe("Steward-owned schema compatibility migration on real Postgres"
         expect(sharedRowsAfterReadiness).toEqual([
           { hash: "shared-eliza-sentinel", created_at: "1793072800004" },
         ]);
+
+        const quotedOwner = `steward quoted owner ${randomUUID().replaceAll("-", "").slice(0, 12)}`;
+        postgresRoles.push(quotedOwner);
+        await admin.unsafe(`CREATE ROLE "${quotedOwner}"`);
+        const definition = await getBootstrapFunctionDefinition(
+          adapter,
+          "auth_tenant_config_subject",
+        );
+        await client.unsafe("DROP FUNCTION steward_bootstrap.auth_tenant_config_subject(text)");
+        await client.unsafe(definition);
+        await client.unsafe(
+          `ALTER FUNCTION steward_bootstrap.auth_tenant_config_subject(text) OWNER TO "${quotedOwner}"`,
+        );
+        await expect(inspectStewardSchemaMigrations({ client: adapter })).rejects.toThrow(
+          /auth_tenant_config_subject.*ACL/,
+        );
       } finally {
         await client.end({ timeout: 5 });
       }

@@ -270,15 +270,21 @@ type RpProvenanceColumn = {
 
 type BootstrapFunctionCatalogRow = {
   function_name: string;
+  identity_arguments: string;
+  function_arguments: string;
+  result_type: string;
   language_name: string;
   volatility: string;
   security_definer: boolean;
   configuration: string;
   source: string;
-  acl: string;
+  public_execute: boolean;
 };
 
 type ExpectedBootstrapFunction = {
+  identityArguments: string;
+  functionArguments: string;
+  resultType: string;
   language: "sql" | "plpgsql";
   volatility: "s" | "v";
   source: string;
@@ -288,17 +294,44 @@ function normalizeFunctionSource(source: string): string {
   return source.replaceAll("\r\n", "\n").trim();
 }
 
+function normalizeFunctionDeclaration(source: string): string {
+  return source
+    .trim()
+    .replace(/\s+DEFAULT\s+NULL(?:::[a-z_][a-z0-9_]*(?:\[\])?)?/gi, " DEFAULT NULL")
+    .replace(/\bvarchar\(\d+\)/gi, "character varying")
+    .replace(/\btimestamptz\b/gi, "timestamp with time zone")
+    .replace(/\s+/g, " ")
+    .replace(/\s*,\s*/g, ", ")
+    .replace(/\bTABLE\s+\(/gi, "TABLE(")
+    .replace(/\(\s+/g, "(")
+    .replace(/\s+\)/g, ")");
+}
+
+function normalizeFunctionIdentityArguments(source: string): string {
+  return normalizeFunctionDeclaration(source).replace(/\s+DEFAULT\s+NULL/gi, "");
+}
+
 function getExpectedBootstrapFunctions(schema: string): Map<string, ExpectedBootstrapFunction> {
   const rendered = renderStewardSchemaMigration(getStewardSchemaMigrationSource(), schema);
   const functions = new Map<string, ExpectedBootstrapFunction>();
   const pattern =
-    /CREATE OR REPLACE FUNCTION\s+"steward_bootstrap"\."([^"]+)"\s*\([\s\S]*?\)\s*RETURNS[\s\S]*?\nLANGUAGE\s+(sql|plpgsql)\s*\n(STABLE|VOLATILE)\s*\nSECURITY DEFINER\s*\nSET search_path = pg_catalog\s*\nAS \$\$([\s\S]*?)\$\$;/g;
+    /CREATE OR REPLACE FUNCTION\s+"steward_bootstrap"\."([^"]+)"\s*\(([\s\S]*?)\)\s*RETURNS\s+([\s\S]*?)\nLANGUAGE\s+(sql|plpgsql)\s*\n(STABLE|VOLATILE)\s*\nSECURITY DEFINER\s*\nSET search_path = pg_catalog\s*\nAS \$\$([\s\S]*?)\$\$;/g;
   for (const match of rendered.matchAll(pattern)) {
-    const [, name, language, volatility, source] = match;
-    if (!name || !language || !volatility || source === undefined) {
+    const [, name, identityArguments, resultType, language, volatility, source] = match;
+    if (
+      !name ||
+      identityArguments === undefined ||
+      !resultType ||
+      !language ||
+      !volatility ||
+      source === undefined
+    ) {
       throw new Error("Steward bootstrap function source is malformed");
     }
     functions.set(name, {
+      identityArguments: normalizeFunctionIdentityArguments(identityArguments),
+      functionArguments: normalizeFunctionDeclaration(identityArguments),
+      resultType: normalizeFunctionDeclaration(resultType),
       language: language as "sql" | "plpgsql",
       volatility: volatility === "STABLE" ? "s" : "v",
       source: normalizeFunctionSource(source),
@@ -327,12 +360,22 @@ async function assertBootstrapFunctionCatalog(
   const rows = await transaction.unsafe<BootstrapFunctionCatalogRow>(`
     SELECT
       procedure.proname AS function_name,
+      pg_catalog.pg_get_function_identity_arguments(procedure.oid) AS identity_arguments,
+      pg_catalog.pg_get_function_arguments(procedure.oid) AS function_arguments,
+      pg_catalog.pg_get_function_result(procedure.oid) AS result_type,
       language.lanname AS language_name,
       procedure.provolatile::text AS volatility,
       procedure.prosecdef AS security_definer,
       COALESCE(array_to_string(procedure.proconfig, ','), '') AS configuration,
       procedure.prosrc AS source,
-      COALESCE(procedure.proacl::text, '') AS acl
+      EXISTS (
+        SELECT 1
+        FROM pg_catalog.aclexplode(
+          COALESCE(procedure.proacl, pg_catalog.acldefault('f', procedure.proowner))
+        ) AS function_acl
+        WHERE function_acl.grantee = 0
+          AND function_acl.privilege_type = 'EXECUTE'
+      ) AS public_execute
     FROM pg_catalog.pg_proc procedure
     JOIN pg_catalog.pg_namespace namespace ON namespace.oid = procedure.pronamespace
     JOIN pg_catalog.pg_language language ON language.oid = procedure.prolang
@@ -346,22 +389,34 @@ async function assertBootstrapFunctionCatalog(
     const mismatch =
       matches.length !== 1 || !actual
         ? "identity"
-        : actual.language_name !== functionExpectation.language
-          ? "language"
-          : actual.volatility !== functionExpectation.volatility
-            ? "volatility"
-            : actual.security_definer !== true
-              ? "security"
-              : actual.configuration !== "search_path=pg_catalog"
-                ? "search path"
-                : normalizeFunctionSource(actual.source) !== functionExpectation.source
-                  ? "source"
-                  : /(?:^\{|,)=X\//.test(actual.acl)
-                    ? "ACL"
-                    : undefined;
+        : normalizeFunctionDeclaration(actual.identity_arguments) !==
+            functionExpectation.identityArguments
+          ? "arguments"
+          : normalizeFunctionDeclaration(actual.function_arguments) !==
+              functionExpectation.functionArguments
+            ? "argument defaults"
+            : normalizeFunctionDeclaration(actual.result_type) !== functionExpectation.resultType
+              ? "result"
+              : actual.language_name !== functionExpectation.language
+                ? "language"
+                : actual.volatility !== functionExpectation.volatility
+                  ? "volatility"
+                  : actual.security_definer !== true
+                    ? "security"
+                    : actual.configuration !== "search_path=pg_catalog"
+                      ? "search path"
+                      : normalizeFunctionSource(actual.source) !== functionExpectation.source
+                        ? "source"
+                        : actual.public_execute
+                          ? "ACL"
+                          : undefined;
     if (mismatch) {
+      const resultDetail =
+        mismatch === "result" && actual
+          ? `: ${normalizeFunctionDeclaration(actual.result_type)} != ${functionExpectation.resultType}`
+          : "";
       throw new Error(
-        `Steward bootstrap function ${name} does not match the release catalog (${mismatch})`,
+        `Steward bootstrap function ${name} does not match the release catalog (${mismatch})${resultDetail}`,
       );
     }
   }
@@ -371,6 +426,9 @@ async function assertBootstrapFunctionCatalog(
   if (
     statusRows.length !== 1 ||
     !status ||
+    status.identity_arguments !== "" ||
+    normalizeFunctionDeclaration(status.result_type) !==
+      "TABLE(migration_order bigint, tag text, hash text, created_at bigint)" ||
     status.language_name !== "sql" ||
     status.volatility !== "s" ||
     status.security_definer !== true ||
