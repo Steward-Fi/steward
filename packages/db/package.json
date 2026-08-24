@@ -6,12 +6,14 @@
   "main": "src/index.ts",
   "exports": {
     ".": "./src/index.ts",
-    "./pglite": "./src/pglite-entry.ts"
+    "./pglite": "./src/pglite-entry.ts",
+    "./steward-schema-migrations": "./src/steward-schema-migrations.ts"
   },
   "scripts": {
     "build": "tsc --noEmit",
     "dev": "tsc --watch",
     "migrate": "bun src/migrate.ts",
+    "migrate:steward-schema": "bun src/steward-schema-migrations.ts",
     "migrate:neon": "drizzle-kit migrate",
     "generate": "drizzle-kit generate",
     "test": "bun test --timeout 30000"
