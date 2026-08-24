@@ -1129,12 +1129,17 @@ async function rotateRefreshTokenInsideTenant(
     const newRefreshToken = randomBytes(40).toString("hex");
     const newRefreshTokenHash = hashToken(newRefreshToken);
     const successorId = randomBytes(16).toString("hex");
-    const successorExpiresAt = new Date(Date.now() + REFRESH_TOKEN_EXPIRY_DAYS * 86400 * 1000);
+    // Raw SQL parameters do not receive Drizzle's timestamp column encoder.
+    // Keep the driver boundary primitive-only: Neon WebSocket rejects a Date
+    // object before PostgreSQL can execute the rotation function.
+    const successorExpiresAt = new Date(
+      Date.now() + REFRESH_TOKEN_EXPIRY_DAYS * 86400 * 1000,
+    ).toISOString();
     const rotated = bootstrapRows<{ id: string }>(
       await tx.execute(sql`
         SELECT * FROM steward_bootstrap.auth_rotate_refresh_token(
           ${tokenHash}, ${targetTenantId}, ${successorId},
-          ${newRefreshTokenHash}, ${successorExpiresAt}
+          ${newRefreshTokenHash}, ${successorExpiresAt}::timestamptz
         )
       `),
     );
