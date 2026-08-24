@@ -504,6 +504,8 @@ describe("fail-closed magic-link delivery", () => {
       const providers = [
         { send: async () => undefined } as unknown as EmailProvider,
         { send: async () => ({ provider: "resend", id: "" }) },
+        { send: async () => ({ provider: "resend\u2028forged", id: "message-id" }) },
+        { send: async () => ({ provider: "resend", id: "message-id\u202Etxt" }) },
         {
           send: async () => {
             throw new Error("provider rejection canary");
