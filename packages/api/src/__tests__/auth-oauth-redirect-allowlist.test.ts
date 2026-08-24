@@ -229,7 +229,7 @@ describeWithDatabase("OAuth redirect_uri allowlist", () => {
     expect(callbackRes.status).toBe(400);
     const body = (await callbackRes.json()) as { ok: boolean; error: string };
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("redirect_uri is not allowed");
+    expect(body.error).toContain("application return address is not allowed");
   });
 
   it("rejects /token when redirectUri is outside the tenant allowlist", async () => {

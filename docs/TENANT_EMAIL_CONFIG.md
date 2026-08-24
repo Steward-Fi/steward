@@ -17,8 +17,11 @@ If a tenant has no `tenant_configs.email_config`, auth continues using the globa
   "apiKeyEncrypted": "...",
   "from": "Tenant <login@example.com>",
   "replyTo": "support@example.com",
+  "brandName": "Acme",
   "templateId": "acme",
   "subjectOverride": "Sign in",
+  "magicLinkBaseUrl": "https://app.acme.example",
+  "magicLinkCallbackPath": "/auth/callback/email",
   "templates": {
     "magicLink": { "subject": "...", "text": "...", "html": "..." },
     "otp": { "subject": "...", "text": "...", "html": "..." }
@@ -66,18 +69,61 @@ curl -X DELETE "$API_BASE/platform/tenants/acme/email-config" \
 ## Template-only branding (no per-tenant Resend key)
 
 A tenant can keep the platform's global Resend provider and only override the
-email branding. PATCH with no `apiKey` (and no `from`):
+email branding. `brandName` customizes both built-in magic-link and OTP
+templates without requiring raw HTML. PATCH with no `apiKey` (and no `from`):
 
 ```bash
 curl -X PATCH "$API_BASE/platform/tenants/acme/email-config" \
   -H "Content-Type: application/json" \
   -H "X-Steward-Platform-Key: $STEWARD_PLATFORM_KEY" \
-  -d '{ "templateId": "acme" }'
+  -d '{ "brandName": "Acme" }'
 ```
 
 Branding fields are merged over any existing config, so a template-only PATCH
 never clobbers `magicLinkBaseUrl` or stored provider credentials. `from`
 without `apiKey` is rejected (provider config is all-or-nothing).
+
+`brandName` is a single-line display string of at most 100 characters. It
+defaults to `Steward` when unset. Use `subjectOverride` only when the subject
+must differ from the built-in `Sign in to <brand name>` copy.
+
+## Hosted callback routing
+
+When a tenant's application owns the browser callback, configure both its
+public origin and the root-relative route that the application actually
+serves. These fields can be patched together with `brandName` and merge over
+any existing provider credentials:
+
+```bash
+curl -X PATCH "$API_BASE/platform/tenants/acme/email-config" \
+  -H "Content-Type: application/json" \
+  -H "X-Steward-Platform-Key: $STEWARD_PLATFORM_KEY" \
+  -d '{
+    "brandName": "Acme",
+    "magicLinkBaseUrl": "https://app.acme.example",
+    "magicLinkCallbackPath": "/auth/callback/email"
+  }'
+```
+
+Without `magicLinkBaseUrl`, links use Steward's global `APP_URL`. When a base
+URL is set without a callback path, the path defaults to
+`/auth/email/verify`. Always verify that a generated link lands on the tenant
+application before promoting the configuration.
+
+Hosted deployments can also set a durable environment fallback for shared
+email delivery:
+
+```bash
+EMAIL_BRAND_NAME=Acme
+EMAIL_MAGIC_LINK_BASE_URL=https://app.acme.example
+EMAIL_MAGIC_LINK_CALLBACK_PATH=/auth/callback/email
+```
+
+These values are used when tenant email config is absent or temporarily
+unavailable. A tenant's explicit `brandName` and `magicLinkBaseUrl` still take
+precedence. Keep the email link origin separate from `APP_URL` when `APP_URL`
+must identify the Steward API for OAuth callbacks. The email base must be a
+credential-free HTTP(S) origin, and the callback must be root-relative.
 
 ## Custom raw templates (deployer-supplied branded markup)
 

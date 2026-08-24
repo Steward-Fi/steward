@@ -41,14 +41,14 @@ describe("enterprise OIDC authorization-code SSO hardening", () => {
     expect(callbackRoute).toContain("await getChallengeStore().get(stateKey)");
     expect(callbackRoute).toContain("stateData.providerId !== providerId");
     expect(callbackRoute).toContain("code.length > 4_096 || state.length > 256");
-    expect(callbackRoute).toContain('error: "OIDC authorization failed"');
+    expect(callbackRoute).toContain('code: "oidc_authorization_failed"');
     expect(callbackRoute).not.toContain("`OIDC error: ${errorParam}`");
     expect(callbackRoute).toContain("exchangeOidcAuthorizationCode");
     expect(callbackRoute).toContain("verifyOidcJwt(stateData.tenantId, provider, idToken)");
     expect(callbackRoute).toContain("verified.claims.nonce !== stateData.nonce");
-    expect(callbackRoute).toContain("Enterprise OIDC SSO requires a verified email claim");
+    expect(callbackRoute).toContain('code: "oidc_verified_email_required"');
     expect(callbackRoute).toContain("isVerifiedSsoEmailDomainForTenant");
-    expect(callbackRoute).toContain("Enterprise OIDC SSO email domain is not verified");
+    expect(callbackRoute).toContain('code: "oidc_email_domain_unverified"');
     expect(callbackRoute.indexOf("await getChallengeStore().get(stateKey)")).toBeLessThan(
       callbackRoute.indexOf("exchangeOidcAuthorizationCode"),
     );

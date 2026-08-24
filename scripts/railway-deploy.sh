@@ -7,8 +7,10 @@ set -euo pipefail
 # polls for deployment success, and verifies the /health endpoint.
 #
 # Usage: ./scripts/railway-deploy.sh <image-tag> [--dry-run]
+#        RAILWAY_IMAGE_DIGEST=sha256:<64-hex> ./scripts/railway-deploy.sh [--dry-run]
 #   e.g. ./scripts/railway-deploy.sh v0.5.0
 #        ./scripts/railway-deploy.sh develop --dry-run
+#        RAILWAY_IMAGE_DIGEST=sha256:<64-hex> ./scripts/railway-deploy.sh
 #
 # Environment variables:
 #   RAILWAY_TOKEN       (required) Railway API bearer token
@@ -16,7 +18,13 @@ set -euo pipefail
 #   RAILWAY_ENV_ID      (REQUIRED) the deployer's own Railway environment id
 #   RAILWAY_IMAGE_REPO  (optional) default: ghcr.io/steward-fi/steward (the
 #                                  canonical published OSS image)
+#   RAILWAY_IMAGE_DIGEST (optional) immutable sha256 digest. Mutually exclusive
+#                                  with the positional image tag. Production
+#                                  deploys should always use this mode.
 #   RAILWAY_HEALTH_URL  (optional) the deployer's own /health URL to verify
+#   RAILWAY_REQUIRE_HEALTH (optional, default: false) fail before mutation when
+#                                  RAILWAY_HEALTH_URL is absent. Production CI
+#                                  must set this to true.
 #   DEPLOY_TIMEOUT      (optional) max seconds to wait for deploy, default: 300
 #   RAILWAY_ALLOW_REJECTED_DEPLOY (optional, default: fail closed) when "true",
 #                       a deployment Railway rejected before any container ran
@@ -48,6 +56,7 @@ fail() { echo -e "${RED}[railway]${RESET} $*" >&2; }
 SERVICE_ID="${RAILWAY_SERVICE_ID:-}"
 ENV_ID="${RAILWAY_ENV_ID:-}"
 IMAGE_REPO="${RAILWAY_IMAGE_REPO:-ghcr.io/steward-fi/steward}"
+IMAGE_DIGEST="${RAILWAY_IMAGE_DIGEST:-}"
 HEALTH_URL="${RAILWAY_HEALTH_URL:-}"
 TIMEOUT="${DEPLOY_TIMEOUT:-300}"
 API="https://backboard.railway.com/graphql/v2"
@@ -71,6 +80,7 @@ for arg in "$@"; do
     --dry-run) DRY_RUN=true ;;
     -h|--help)
       echo "Usage: $0 <image-tag> [--dry-run]"
+      echo "       RAILWAY_IMAGE_DIGEST=sha256:<64-hex> $0 [--dry-run]"
       echo "  e.g. $0 v0.5.0"
       exit 0
       ;;
@@ -86,16 +96,26 @@ for arg in "$@"; do
   esac
 done
 
-if [[ -z "$IMAGE_TAG" ]]; then
-  fail "Image tag required. Usage: $0 <image-tag>"
+if [[ -n "$IMAGE_TAG" && -n "$IMAGE_DIGEST" ]]; then
+  fail "Choose exactly one image selector: a positional tag or RAILWAY_IMAGE_DIGEST"
+  exit 1
+fi
+
+if [[ -z "$IMAGE_TAG" && -z "$IMAGE_DIGEST" ]]; then
+  fail "Image selector required: pass an image tag or set RAILWAY_IMAGE_DIGEST"
   exit 1
 fi
 
 # OCI/Docker tags are at most 128 characters and contain only this conservative
 # subset. Reject whitespace, shell-like syntax, slashes, and control characters
 # before the value reaches logs or a deployment API.
-if [[ ! "$IMAGE_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+if [[ -n "$IMAGE_TAG" && ! "$IMAGE_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
   fail "Invalid image tag: expected an OCI tag (letters, digits, _, ., -; max 128 chars)"
+  exit 1
+fi
+
+if [[ -n "$IMAGE_DIGEST" && ! "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+  fail "Invalid image digest: expected sha256 followed by exactly 64 lowercase hex characters"
   exit 1
 fi
 
@@ -104,7 +124,22 @@ if [[ -z "${RAILWAY_TOKEN:-}" ]]; then
   exit 1
 fi
 
-FULL_IMAGE="${IMAGE_REPO}:${IMAGE_TAG}"
+if [[ "${RAILWAY_REQUIRE_HEALTH:-false}" != "true" &&
+      "${RAILWAY_REQUIRE_HEALTH:-false}" != "false" ]]; then
+  fail "RAILWAY_REQUIRE_HEALTH must be true or false"
+  exit 1
+fi
+
+if [[ "${RAILWAY_REQUIRE_HEALTH:-false}" == "true" && -z "$HEALTH_URL" ]]; then
+  fail "RAILWAY_HEALTH_URL is required when RAILWAY_REQUIRE_HEALTH=true"
+  exit 1
+fi
+
+if [[ -n "$IMAGE_DIGEST" ]]; then
+  FULL_IMAGE="${IMAGE_REPO}@${IMAGE_DIGEST}"
+else
+  FULL_IMAGE="${IMAGE_REPO}:${IMAGE_TAG}"
+fi
 
 # ---------------------------------------------------------------------------
 # Helper: GraphQL request

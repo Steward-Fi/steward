@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
-import { StewardAuth } from "../auth";
+import { isStewardPasskeyAlreadyRegisteredError, StewardAuth } from "../auth";
 import type { SessionStorage } from "../auth-types";
 import { StewardApiError } from "../client";
 
@@ -68,27 +68,31 @@ function restoreBrowserShim(): void {
   globalThis.window = originalWindow;
 }
 
+const startRegistration = mock(async () => ({
+  id: "credential-1",
+  rawId: "credential-1",
+  response: {
+    clientDataJSON: "client-data",
+    attestationObject: "attestation",
+  },
+  type: "public-key",
+}));
+
+const startAuthentication = mock(async () => ({
+  id: "credential-login",
+  rawId: "credential-login",
+  response: {
+    clientDataJSON: "client-data",
+    authenticatorData: "authenticator-data",
+    signature: "signature",
+    userHandle: "u-1",
+  },
+  type: "public-key",
+}));
+
 mock.module("@simplewebauthn/browser", () => ({
-  startRegistration: async () => ({
-    id: "credential-1",
-    rawId: "credential-1",
-    response: {
-      clientDataJSON: "client-data",
-      attestationObject: "attestation",
-    },
-    type: "public-key",
-  }),
-  startAuthentication: async () => ({
-    id: "credential-login",
-    rawId: "credential-login",
-    response: {
-      clientDataJSON: "client-data",
-      authenticatorData: "authenticator-data",
-      signature: "signature",
-      userHandle: "u-1",
-    },
-    type: "public-key",
-  }),
+  startRegistration,
+  startAuthentication,
 }));
 
 function fakeJwt(claims: Record<string, unknown> = {}): string {
@@ -126,6 +130,8 @@ function memoryStorage(): SessionStorage {
 
 beforeEach(() => {
   captured = [];
+  startRegistration.mockClear();
+  startAuthentication.mockClear();
   originalFetch = global.fetch;
   installFetch();
   installBrowserShim();
@@ -154,6 +160,7 @@ describe("StewardAuth.addPasskey", () => {
       id: "credential-1",
       type: "public-key",
     });
+    expect(startRegistration).toHaveBeenCalledWith({ optionsJSON: REG_OPTIONS });
 
     // And the resulting session reflects the verify payload.
     expect(result.token).toBe("test-jwt");
@@ -177,6 +184,44 @@ describe("StewardAuth.addPasskey", () => {
     }) as typeof fetch;
     const auth = new StewardAuth({ baseUrl: "https://api.example.test" });
     await expect(auth.addPasskey("shadow@shad0w.xyz")).rejects.toBeInstanceOf(StewardApiError);
+  });
+
+  it("preserves the structured existing-passkey recovery code", async () => {
+    global.fetch = (async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("/auth/passkey/register/options")) {
+        return new Response(
+          JSON.stringify({
+            ok: false,
+            error: "A passkey already exists for this email. Sign in with it instead.",
+            code: "passkey_already_registered",
+          }),
+          { status: 409, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+
+    const auth = new StewardAuth({ baseUrl: "https://api.example.test" });
+    let caught: unknown;
+    try {
+      await auth.addPasskey("shadow@shad0w.xyz", { emailGrant: "reusable-email-grant" });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(StewardApiError);
+    expect(isStewardPasskeyAlreadyRegisteredError(caught)).toBe(true);
+    if (!isStewardPasskeyAlreadyRegisteredError(caught)) {
+      throw new Error("expected passkey_already_registered error");
+    }
+    expect(caught.status).toBe(409);
+    expect(caught.data).toEqual({
+      ok: false,
+      error: "A passkey already exists for this email. Sign in with it instead.",
+      code: "passkey_already_registered",
+    });
+    expect(startRegistration).not.toHaveBeenCalled();
   });
 
   it("forwards challengeId when completing passkey login", async () => {
@@ -206,11 +251,19 @@ describe("StewardAuth.addPasskey", () => {
     const auth = new StewardAuth({ baseUrl: "https://api.example.test" });
     await auth.signInWithPasskey("shadow@shad0w.xyz");
 
+    expect(startAuthentication).toHaveBeenCalledTimes(1);
     expect(captured[1]?.url).toBe("https://api.example.test/auth/passkey/login/verify");
     expect(captured[1]?.body).toMatchObject({
       email: "shadow@shad0w.xyz",
       challengeId: "login-challenge",
       response: { id: "credential-login", type: "public-key" },
+    });
+    expect(startAuthentication).toHaveBeenCalledWith({
+      optionsJSON: {
+        challenge: "login-challenge",
+        challengeId: "login-challenge",
+        rpId: "api.example.test",
+      },
     });
   });
 
@@ -261,6 +314,13 @@ describe("StewardAuth.addPasskey", () => {
     expect(captured[1]?.body).toMatchObject({
       challengeId: "mfa-challenge",
       response: { id: "credential-login", type: "public-key" },
+    });
+    expect(startAuthentication).toHaveBeenCalledWith({
+      optionsJSON: {
+        challenge: "mfa-challenge",
+        challengeId: "mfa-challenge",
+        rpId: "api.example.test",
+      },
     });
     expect(result.token).toBe(steppedUpToken);
     expect(storage.getItem("steward_session_token")).toBe(steppedUpToken);

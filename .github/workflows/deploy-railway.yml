@@ -4,122 +4,163 @@
 #   develop ──(deploy-staging.yml, auto)──▶ STAGING
 #   main    ──(THIS workflow, manual/gated)──▶ PRODUCTION
 #
-# Production is promoted DELIBERATELY, never auto-deployed. Promotion = merge
-# develop -> main (reviewed), then a maintainer dispatches this workflow with
-# the image tag to ship (`main` or a `v*` release tag). The `production` GitHub
-# environment can carry required-reviewer protection for a second gate. Prod
-# should rarely change.
-#
-# Triggers:
-#   1. Manual dispatch (workflow_dispatch) with image tag input
-#   2. Reusable workflow (workflow_call) for downstream consumers that embed
-#      Steward as a dependency (Steward is a standalone, self-hostable OSS
-#      product; consumers integrate via its API, they do not own it).
+# Production accepts only an immutable digest whose exact source commit is on
+# main and has a successful Docker push run for main. A branch/tag string is
+# never an admissible production selector. The production GitHub environment
+# should also require reviewer approval.
 name: Deploy Railway (Production)
 
+# Deliberately dispatch-only. A reusable workflow executes in the caller's
+# repository context, so actions/checkout and github.repository would verify
+# the caller's main branch rather than this image-producing repository.
 on:
-  # Manual trigger from Actions tab
   workflow_dispatch:
     inputs:
-      image_tag:
-        description: "Docker image tag to deploy (e.g. v0.5.0, develop)"
+      main_sha:
+        description: "Full 40-character commit SHA already merged to main"
         required: true
         type: string
       dry_run:
-        description: "Dry run (skip actual deploy)"
+        description: "Dry run (resolve and verify the digest; skip Railway mutation)"
         required: false
         type: boolean
         default: false
-
-  # Reusable workflow (callable by downstream consumers embedding Steward)
-  workflow_call:
-    inputs:
-      image_tag:
-        description: "Docker image tag to deploy"
-        required: true
-        type: string
-      dry_run:
-        description: "Dry run (skip actual deploy)"
-        required: false
-        type: boolean
-        default: false
-    secrets:
-      RAILWAY_TOKEN:
-        required: true
 
 permissions:
+  actions: read
   contents: read
+  packages: read
   deployments: write
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    # Bind to the `production` GitHub environment so required-reviewer / wait
-    # timer protection rules (configured in repo Settings → Environments) gate
-    # the prod deploy. This is the second gate on top of "only from main".
+    timeout-minutes: 15
     environment:
       name: Production
       url: ${{ vars.PRODUCTION_RAILWAY_HEALTH_URL }}
 
     steps:
-      - name: Checkout
+      # Always inspect the authoritative main ref. Selecting another branch in
+      # the workflow-dispatch UI must not change the source of a prod deploy.
+      - name: Checkout main history
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: main
+          fetch-depth: 0
 
-      # Resolve the image tag based on trigger type
-      - name: Resolve image tag
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Login to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Verify main provenance and resolve immutable digest
         id: resolve
-        # image_tag is a caller-supplied input; pass it via env (never inline
-        # into the script) to avoid shell expression-injection.
         env:
-          IMAGE_TAG: ${{ inputs.image_tag }}
+          GH_TOKEN: ${{ github.token }}
+          MAIN_SHA: ${{ inputs.main_sha }}
+          TARGET_REPOSITORY: ${{ github.repository }}
+          CONFIGURED_IMAGE_REPO: ${{ vars.PRODUCTION_RAILWAY_IMAGE_REPO }}
         run: |
-          TAG="$IMAGE_TAG"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "Image tag resolved: ${TAG}"
+          set -euo pipefail
 
-      - name: Resolve dry-run flag
-        id: flags
-        env:
-          DRY_RUN: ${{ inputs.dry_run }}
-        run: |
-          echo "dry_run=${DRY_RUN}" >> "$GITHUB_OUTPUT"
+          if [[ ! "$MAIN_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "main_sha must be a full lowercase 40-character commit SHA" >&2
+            exit 1
+          fi
 
-      # Create GitHub deployment (shows in repo's Deployments tab)
+          git cat-file -e "${MAIN_SHA}^{commit}"
+          if ! git merge-base --is-ancestor "$MAIN_SHA" refs/remotes/origin/main; then
+            echo "Refusing production deploy: commit is not on origin/main" >&2
+            exit 1
+          fi
+
+          # Being reachable from main is not enough: require the exact main
+          # push to have completed the image-producing Docker workflow.
+          SUCCESSFUL_MAIN_BUILDS=$(gh api --method GET \
+            "repos/${TARGET_REPOSITORY}/actions/workflows/docker.yml/runs" \
+            -f branch=main \
+            -f head_sha="$MAIN_SHA" \
+            -f event=push \
+            -f status=success \
+            -f per_page=1 \
+            --jq '.total_count')
+          if [[ ! "$SUCCESSFUL_MAIN_BUILDS" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Refusing production deploy: no successful exact-SHA main Docker build" >&2
+            exit 1
+          fi
+
+          IMAGE_REPO="${CONFIGURED_IMAGE_REPO:-ghcr.io/steward-fi/steward}"
+          if [[ ! "$IMAGE_REPO" =~ ^ghcr\.io/[a-z0-9._-]+(/[a-z0-9._-]+)+$ ]]; then
+            echo "PRODUCTION_RAILWAY_IMAGE_REPO must be a lowercase ghcr.io repository" >&2
+            exit 1
+          fi
+
+          MANIFEST=$(docker buildx imagetools inspect \
+            "${IMAGE_REPO}:sha-${MAIN_SHA}" --format '{{json .Manifest}}')
+          DIGEST=$(jq -er \
+            '.digest | select(test("^sha256:[0-9a-f]{64}$"))' <<<"$MANIFEST")
+
+          # Verify the bytes currently behind the lookup tag still carry the
+          # exact main-build provenance. This catches a later tag overwrite
+          # even when the historic Actions run itself was green.
+          PROVENANCE=$(docker buildx imagetools inspect \
+            "${IMAGE_REPO}:sha-${MAIN_SHA}" \
+            --format '{{json .Provenance.SLSA.buildDefinition.externalParameters.request.args}}')
+          REVISION=$(jq -er '."label:org.opencontainers.image.revision"' <<<"$PROVENANCE")
+          VERSION=$(jq -er '."label:org.opencontainers.image.version"' <<<"$PROVENANCE")
+          SOURCE=$(jq -er '."label:org.opencontainers.image.source"' <<<"$PROVENANCE")
+          if [[ "$REVISION" != "$MAIN_SHA" || "$VERSION" != "main" || \
+            "$SOURCE" != "https://github.com/${TARGET_REPOSITORY}" ]]; then
+            echo "Refusing production deploy: image provenance is not the exact main build" >&2
+            exit 1
+          fi
+
+          echo "sha=${MAIN_SHA}" >> "$GITHUB_OUTPUT"
+          echo "image_repo=${IMAGE_REPO}" >> "$GITHUB_OUTPUT"
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "image_ref=${IMAGE_REPO}@${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "Production candidate resolved to an immutable main-built digest."
+
       - name: Create GitHub deployment
+        if: ${{ inputs.dry_run == false }}
         id: deployment
         uses: chrnorm/deployment-action@500aa6a23c81ffa1acf71072aee3cfa2cc2e556a # v2
         with:
           token: ${{ github.token }}
           environment: production
-          ref: ${{ github.sha }}
-          description: "Deploy ghcr.io/steward-fi/steward:${{ steps.resolve.outputs.tag }} to Railway"
+          ref: ${{ steps.resolve.outputs.sha }}
+          description: "Deploy ${{ steps.resolve.outputs.image_ref }} to Railway"
 
-      # Run the deploy script
-      - name: Deploy to Railway
-        id: deploy
+      - name: Deploy immutable digest to Railway
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-          # Instance-specific deploy target comes from the DEPLOYER's own repo
-          # config (a self-hoster sets PRODUCTION_RAILWAY_* vars for their own
-          # Railway). Nothing about any specific instance is baked into source.
           RAILWAY_SERVICE_ID: ${{ vars.PRODUCTION_RAILWAY_SERVICE_ID }}
           RAILWAY_ENV_ID: ${{ vars.PRODUCTION_RAILWAY_ENV_ID }}
           RAILWAY_HEALTH_URL: ${{ vars.PRODUCTION_RAILWAY_HEALTH_URL }}
-          # Step outputs derive from the caller-supplied image_tag input, so they
-          # are still tainted — pass via env instead of inlining into the script.
-          RESOLVED_TAG: ${{ steps.resolve.outputs.tag }}
-          DRY_RUN: ${{ steps.flags.outputs.dry_run }}
+          RAILWAY_REQUIRE_HEALTH: "true"
+          RAILWAY_IMAGE_REPO: ${{ steps.resolve.outputs.image_repo }}
+          RAILWAY_IMAGE_DIGEST: ${{ steps.resolve.outputs.digest }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
-          ARGS=("$RESOLVED_TAG")
+          ARGS=()
           if [[ "$DRY_RUN" == "true" ]]; then
             ARGS+=(--dry-run)
           fi
           chmod +x scripts/railway-deploy.sh
           ./scripts/railway-deploy.sh "${ARGS[@]}"
 
-      # Update deployment status on success
       - name: Update deployment status (success)
-        if: success()
+        if: ${{ inputs.dry_run == false && success() }}
         uses: chrnorm/deployment-status@6df8d036fd2fee9eb82936733953da1f8382b41e # v2
         with:
           token: ${{ github.token }}
@@ -127,9 +168,8 @@ jobs:
           state: success
           environment-url: ${{ vars.PRODUCTION_RAILWAY_HEALTH_URL }}
 
-      # Update deployment status on failure
       - name: Update deployment status (failure)
-        if: failure()
+        if: ${{ inputs.dry_run == false && failure() && steps.deployment.outputs.deployment_id != '' }}
         uses: chrnorm/deployment-status@6df8d036fd2fee9eb82936733953da1f8382b41e # v2
         with:
           token: ${{ github.token }}

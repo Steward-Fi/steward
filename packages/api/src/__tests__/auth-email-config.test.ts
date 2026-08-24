@@ -42,6 +42,9 @@ describe("getEmailAuthForTenant", () => {
     delete process.env.STEWARD_MASTER_PASSWORD;
     delete process.env.APP_URL;
     delete process.env.EMAIL_FROM;
+    delete process.env.EMAIL_BRAND_NAME;
+    delete process.env.EMAIL_MAGIC_LINK_BASE_URL;
+    delete process.env.EMAIL_MAGIC_LINK_CALLBACK_PATH;
     delete process.env.RESEND_API_KEY;
   });
 
@@ -58,6 +61,40 @@ describe("getEmailAuthForTenant", () => {
     expect(provider.constructor.name).toBe("ResendProvider");
     expect(provider.from).toBe("Global <login@example.com>");
     expect(provider.replyTo).toBeUndefined();
+  });
+
+  it("keeps hosted branding and callback routing when tenant config is unavailable", async () => {
+    const dbHandle = getDb();
+    await dbHandle.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TEST_TENANT_ID));
+    process.env.EMAIL_BRAND_NAME = "Eliza";
+    process.env.EMAIL_MAGIC_LINK_BASE_URL = "https://cloud-staging.example";
+    process.env.EMAIL_MAGIC_LINK_CALLBACK_PATH = "/auth/callback/email";
+    clearEmailAuthTenantCacheForTests();
+
+    try {
+      const auth = await getEmailAuthForTenant(TEST_TENANT_ID);
+
+      expect((auth as any).brandName).toBe("Eliza");
+      expect((auth as any).baseUrl).toBe("https://cloud-staging.example");
+      expect((auth as any).callbackPath).toBe("/auth/callback/email");
+
+      const rendered = (auth as any).templateRenderer(undefined, {
+        magicLink: "https://cloud-staging.example/auth/callback/email?token=fixture",
+        email: "user@example.com",
+        tenantName: (auth as any).brandName,
+        expiresInMinutes: 10,
+      });
+      expect(rendered.subject).toBe("Sign in to Eliza");
+      expect(rendered.text).toContain(
+        "https://cloud-staging.example/auth/callback/email?token=fixture",
+      );
+      expect(rendered.html).not.toContain("steward.fi");
+    } finally {
+      delete process.env.EMAIL_BRAND_NAME;
+      delete process.env.EMAIL_MAGIC_LINK_BASE_URL;
+      delete process.env.EMAIL_MAGIC_LINK_CALLBACK_PATH;
+      clearEmailAuthTenantCacheForTests();
+    }
   });
 
   it("uses the tenant-specific config when emailConfig is set", async () => {
@@ -123,7 +160,7 @@ describe("getEmailAuthForTenant", () => {
     invalidateEmailAuthForTenant(TEST_TENANT_ID);
   });
 
-  it("uses tenant magicLinkBaseUrl + custom callbackPath when both set", async () => {
+  it("uses tenant branding with its hosted magic-link callback", async () => {
     clearEmailAuthTenantCacheForTests();
 
     const encrypted = new KeyStore(MASTER_PASSWORD).encrypt("tenant-resend-key");
@@ -134,9 +171,10 @@ describe("getEmailAuthForTenant", () => {
       emailConfig: {
         provider: "resend",
         apiKeyEncrypted: JSON.stringify(encrypted),
-        from: "App <noreply@app.example>",
-        magicLinkBaseUrl: "https://app.example.com/",
-        magicLinkCallbackPath: "/login/email-callback",
+        from: "Customer <noreply@customer.example>",
+        brandName: "Customer Cloud",
+        magicLinkBaseUrl: "https://cloud.customer.example/",
+        magicLinkCallbackPath: "/auth/callback/email",
       },
     });
     invalidateEmailAuthForTenant(TEST_TENANT_ID);
@@ -144,8 +182,21 @@ describe("getEmailAuthForTenant", () => {
     const auth = await getEmailAuthForTenant(TEST_TENANT_ID);
 
     // Trailing slash gets stripped from baseUrl
-    expect((auth as any).baseUrl).toBe("https://app.example.com");
-    expect((auth as any).callbackPath).toBe("/login/email-callback");
+    expect((auth as any).baseUrl).toBe("https://cloud.customer.example");
+    expect((auth as any).callbackPath).toBe("/auth/callback/email");
+    expect((auth as any).brandName).toBe("Customer Cloud");
+
+    const rendered = (auth as any).templateRenderer(undefined, {
+      magicLink: `${(auth as any).baseUrl}${(auth as any).callbackPath}?token=fixture`,
+      email: "user@customer.example",
+      tenantName: (auth as any).brandName,
+      expiresInMinutes: 10,
+    });
+    expect(rendered.subject).toBe("Sign in to Customer Cloud");
+    expect(rendered.text).toContain(
+      "https://cloud.customer.example/auth/callback/email?token=fixture",
+    );
+    expect(rendered.html).not.toContain("steward.fi");
 
     await dbHandle.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TEST_TENANT_ID));
     invalidateEmailAuthForTenant(TEST_TENANT_ID);

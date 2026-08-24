@@ -38,6 +38,7 @@ import type {
   StewardMfaRequiredResult,
   StewardOAuthConfig,
   StewardOAuthResult,
+  StewardPasskeyAlreadyRegisteredErrorData,
   StewardProviders,
   StewardRecoveryCodeStatus,
   StewardRecoveryCodesResult,
@@ -287,7 +288,7 @@ function buildSiwsMessage(
 
 type AuthApiResult<T> =
   | { ok: true; status: number; data: T }
-  | { ok: false; status: number; error: string };
+  | { ok: false; status: number; error: string; data: Record<string, unknown> };
 
 // Narrow view of @simplewebauthn/browser — a peer dep we import dynamically.
 type SimpleWebAuthnBrowser = Pick<
@@ -339,10 +340,24 @@ async function authRequest<T>(
       typeof payload.error === "string"
         ? payload.error
         : `Request failed with status ${response.status}`;
-    return { ok: false, status: response.status, error: errMsg };
+    return { ok: false, status: response.status, error: errMsg, data: payload };
   }
 
   return { ok: true, status: response.status, data: payload as unknown as T };
+}
+
+/** Narrow an SDK error to the stable existing-passkey recovery contract. */
+export function isStewardPasskeyAlreadyRegisteredError(
+  error: unknown,
+): error is StewardApiError<StewardPasskeyAlreadyRegisteredErrorData> {
+  if (!(error instanceof StewardApiError) || error.status !== 409) return false;
+  const data = error.data;
+  return (
+    typeof data === "object" &&
+    data !== null &&
+    "code" in data &&
+    data.code === "passkey_already_registered"
+  );
 }
 
 // ─── StewardAuth ──────────────────────────────────────────────────────────────
@@ -924,9 +939,11 @@ export class StewardAuth {
     let authResponse: unknown;
     try {
       // Server-provided options; types are validated by the WebAuthn browser library.
-      authResponse = await lib.startAuthentication(
-        options as Parameters<SimpleWebAuthnBrowser["startAuthentication"]>[0],
-      );
+      authResponse = await lib.startAuthentication({
+        optionsJSON: options as Parameters<
+          SimpleWebAuthnBrowser["startAuthentication"]
+        >[0]["optionsJSON"],
+      });
     } catch (err) {
       throw new StewardApiError(
         `WebAuthn authentication cancelled or failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -979,15 +996,17 @@ export class StewardAuth {
     );
 
     if (!regOptsRes.ok) {
-      throw new StewardApiError(regOptsRes.error, regOptsRes.status);
+      throw new StewardApiError(regOptsRes.error, regOptsRes.status, regOptsRes.data);
     }
 
     let regResponse: unknown;
     try {
       // Server-provided options; types are validated by the WebAuthn browser library.
-      regResponse = await lib.startRegistration(
-        regOptsRes.data as Parameters<SimpleWebAuthnBrowser["startRegistration"]>[0],
-      );
+      regResponse = await lib.startRegistration({
+        optionsJSON: regOptsRes.data as unknown as Parameters<
+          SimpleWebAuthnBrowser["startRegistration"]
+        >[0]["optionsJSON"],
+      });
     } catch (err) {
       throw new StewardApiError(
         `WebAuthn registration cancelled or failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -1736,9 +1755,11 @@ export class StewardAuth {
 
     let authResponse: unknown;
     try {
-      authResponse = await browserLib.startAuthentication(
-        optionsRes.data as Parameters<SimpleWebAuthnBrowser["startAuthentication"]>[0],
-      );
+      authResponse = await browserLib.startAuthentication({
+        optionsJSON: optionsRes.data as unknown as Parameters<
+          SimpleWebAuthnBrowser["startAuthentication"]
+        >[0]["optionsJSON"],
+      });
     } catch (err) {
       throw new StewardApiError(
         `WebAuthn authentication cancelled or failed: ${err instanceof Error ? err.message : String(err)}`,

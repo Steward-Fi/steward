@@ -11,8 +11,8 @@
  * GET  /providers                   — available auth methods (passkey/email/siwe/google/discord)
  * POST /logout                      — client-side logout (no-op server side)
  *
- * POST /passkey/register/options    — { email } → WebAuthn creation options
- * POST /passkey/register/verify     — { email, response } → { token, user }
+ * POST /passkey/register/options    — { email, emailGrant? } → WebAuthn creation options
+ * POST /passkey/register/verify     — { email, response, emailGrant? } → { token, user }
  * POST /passkey/login/options       — { email } → WebAuthn request options
  * POST /passkey/login/verify        — { email, response } → { token, user }
  *
@@ -136,6 +136,7 @@ import {
   type TenantSamlSsoConfig,
   type TenantTestAccountConfig,
 } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { KeyStore, provisionUserWallet, Vault } from "@stwd/vault";
 import bs58 from "bs58";
 import { and, eq, gte, inArray, isNull, lt, sql } from "drizzle-orm";
@@ -151,6 +152,7 @@ import {
   validateWalletAbusePolicy,
   verifyCaptchaToken,
 } from "../services/auth-abuse";
+import { defaultAuthTenantId } from "../services/default-auth-tenant";
 import { verifyEip1271 } from "../services/eip1271";
 import {
   isAllowedOidcClientSecretEnvForTenant,
@@ -164,8 +166,6 @@ import { getConfiguredVault } from "../services/vault-factory";
 import { dispatchWebhook } from "../services/webhook-dispatch";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
-
-const _DEFAULT_TENANT_ID = process.env.STEWARD_DEFAULT_TENANT_ID || "default";
 
 async function withVerifiedAuthTenant<T>(
   tenantId: string,
@@ -829,7 +829,7 @@ async function validateExplicitAuthTenantHint(
 }
 
 function authTenantHint(c: Context, bodyTenantId?: string): string {
-  return c.req.header("X-Steward-Tenant")?.trim() || bodyTenantId?.trim() || _DEFAULT_TENANT_ID;
+  return c.req.header("X-Steward-Tenant")?.trim() || bodyTenantId?.trim() || defaultAuthTenantId();
 }
 
 function smsLoginPurpose(tenantId: string): string {
@@ -1521,6 +1521,22 @@ async function peekEmailGrant(grant: string, email: string, tenantId: string): P
   }
 }
 
+/**
+ * Test-only seam for exercising verified-email enrollment routes without
+ * sending or scraping an OTP. Production grants are still issued exclusively
+ * by /email/otp/verify.
+ */
+export async function _seedEmailGrantForTests(
+  grant: string,
+  email: string,
+  tenantId: string,
+): Promise<void> {
+  await getEmailGrantStore().set(
+    emailGrantKey(grant),
+    JSON.stringify({ email: email.toLowerCase().trim(), tenantId }),
+  );
+}
+
 const OAUTH_CODE_REDEEM_LOCK_TTL_MS = 10 * 1000;
 const OAUTH_CODE_REDEEM_LOCK_CLEANUP_TIMEOUT_MS = 250;
 
@@ -1957,10 +1973,50 @@ function buildTemplateRenderers(templates: TenantEmailConfig["templates"]): {
   };
 }
 
+function globalEmailMagicLinkBaseUrl(): string {
+  const emailBaseUrl = runtimeEnvironmentValue("EMAIL_MAGIC_LINK_BASE_URL")?.trim();
+  if (emailBaseUrl) {
+    const parsed = new URL(emailBaseUrl);
+    const normalized = emailBaseUrl.replace(/\/$/, "");
+    if (
+      !["http:", "https:"].includes(parsed.protocol) ||
+      parsed.username ||
+      parsed.password ||
+      parsed.search ||
+      parsed.hash ||
+      parsed.origin !== normalized
+    ) {
+      throw new Error("EMAIL_MAGIC_LINK_BASE_URL must be a credential-free HTTP(S) origin");
+    }
+    return parsed.origin;
+  }
+
+  return runtimeEnvironmentValue("APP_URL")?.trim().replace(/\/$/, "") || "https://steward.fi";
+}
+
+function globalEmailMagicLinkCallbackPath(): string | undefined {
+  const callbackPath = runtimeEnvironmentValue("EMAIL_MAGIC_LINK_CALLBACK_PATH")?.trim();
+  if (!callbackPath) return undefined;
+  if (!callbackPath.startsWith("/") || callbackPath.startsWith("//")) {
+    throw new Error("EMAIL_MAGIC_LINK_CALLBACK_PATH must be a root-relative path");
+  }
+  return callbackPath;
+}
+
+function globalEmailBrandName(): string | undefined {
+  const brandName = runtimeEnvironmentValue("EMAIL_BRAND_NAME")?.trim();
+  if (!brandName) return undefined;
+  if (brandName.length > 100 || /[\r\n]/.test(brandName)) {
+    throw new Error("EMAIL_BRAND_NAME must be a single-line string of at most 100 characters");
+  }
+  return brandName;
+}
+
 function buildGlobalEmailAuth(overrides?: {
   baseUrl?: string;
   callbackPath?: string;
   templateId?: string;
+  brandName?: string;
   subjectOverride?: string;
   replyTo?: string;
   templates?: TenantEmailConfig["templates"];
@@ -1978,11 +2034,12 @@ function buildGlobalEmailAuth(overrides?: {
 
   return new EmailAuth({
     from: process.env.EMAIL_FROM || "login@steward.fi",
-    baseUrl: overrides?.baseUrl?.replace(/\/$/, "") || process.env.APP_URL || "https://steward.fi",
-    callbackPath: overrides?.callbackPath,
+    baseUrl: overrides?.baseUrl?.replace(/\/$/, "") || globalEmailMagicLinkBaseUrl(),
+    callbackPath: overrides?.callbackPath || globalEmailMagicLinkCallbackPath(),
     provider,
     tokenStore: getTokenStore(),
     templateId: overrides?.templateId,
+    brandName: overrides?.brandName || globalEmailBrandName(),
     subjectOverride: overrides?.subjectOverride,
     replyTo: overrides?.replyTo,
     ...buildTemplateRenderers(overrides?.templates),
@@ -2041,6 +2098,7 @@ async function createEmailAuthForTenant(tenantId: string): Promise<EmailAuth> {
       baseUrl: magicLinkBaseUrl,
       callbackPath,
       templateId: emailConfig?.templateId,
+      brandName: emailConfig?.brandName,
       subjectOverride: emailConfig?.subjectOverride,
       replyTo: emailConfig?.replyTo,
       templates: emailConfig?.templates,
@@ -2062,16 +2120,16 @@ async function createEmailAuthForTenant(tenantId: string): Promise<EmailAuth> {
         })
       : undefined;
 
-  const baseUrl =
-    magicLinkBaseUrl?.replace(/\/$/, "") || process.env.APP_URL || "https://steward.fi";
+  const baseUrl = magicLinkBaseUrl?.replace(/\/$/, "") || globalEmailMagicLinkBaseUrl();
 
   return new EmailAuth({
     from,
     baseUrl,
-    callbackPath,
+    callbackPath: callbackPath || globalEmailMagicLinkCallbackPath(),
     provider,
     tokenStore: getTokenStore(),
     templateId: emailConfig.templateId,
+    brandName: emailConfig.brandName || globalEmailBrandName(),
     subjectOverride: emailConfig.subjectOverride,
     replyTo: emailConfig.replyTo,
     ...buildTemplateRenderers(emailConfig.templates),
@@ -2425,20 +2483,22 @@ async function writeAuthLoginAudit(
   claims: Record<string, unknown> | undefined,
   metadata: Record<string, unknown> = {},
 ): Promise<void> {
-  await writeAuditEvent({
-    tenantId,
-    actorType: "user",
-    actorId: userId,
-    action: "auth.login",
-    resourceType: "session",
-    metadata: {
-      method: typeof claims?.authMethod === "string" ? claims.authMethod : "unknown",
-      ...metadata,
-    },
-    ipAddress: c.req.header("x-forwarded-for") ?? null,
-    userAgent: c.req.header("user-agent") ?? null,
-    requestId: c.req.header("x-request-id") ?? null,
-  });
+  await withVerifiedAuthTenant(tenantId, userId, () =>
+    writeAuditEvent({
+      tenantId,
+      actorType: "user",
+      actorId: userId,
+      action: "auth.login",
+      resourceType: "session",
+      metadata: {
+        method: typeof claims?.authMethod === "string" ? claims.authMethod : "unknown",
+        ...metadata,
+      },
+      ipAddress: c.req.header("x-forwarded-for") ?? null,
+      userAgent: c.req.header("user-agent") ?? null,
+      requestId: c.get("requestId") ?? c.req.header("x-request-id") ?? null,
+    }),
+  );
 }
 
 type WalletTenantResult = {
@@ -3228,19 +3288,7 @@ async function buildAuthOrMfaResponse(
   }
 
   if (c) {
-    await writeAuditEvent({
-      tenantId,
-      actorType: "user",
-      actorId: userId,
-      action: "auth.login",
-      resourceType: "session",
-      metadata: {
-        method: typeof claims.authMethod === "string" ? claims.authMethod : "unknown",
-      },
-      ipAddress: c.req.header("x-forwarded-for") ?? null,
-      userAgent: c.req.header("user-agent") ?? null,
-      requestId: c.get("requestId") ?? null,
-    });
+    await writeAuthLoginAudit(c, tenantId, userId, claims);
   }
   const token = await createSessionToken(address, tenantId, sessionClaims);
   const refreshToken = await createRefreshToken(userId, tenantId, sessionClaims);
@@ -3864,7 +3912,7 @@ async function completeEmailAuth(
   tenantId?: string,
   opts: { allowTenantJoin?: boolean } = {},
 ): Promise<CompletedEmailAuthResult> {
-  const hintedTenantId = c.req.header("X-Steward-Tenant") || tenantId || _DEFAULT_TENANT_ID;
+  const hintedTenantId = c.req.header("X-Steward-Tenant") || tenantId || defaultAuthTenantId();
   const hintedAuthAbuseConfig = await getTenantAuthAbuseConfig(hintedTenantId);
   const hintedEmailPolicyError = validateEmailAbusePolicy(email, hintedAuthAbuseConfig);
   if (hintedEmailPolicyError) {
@@ -4035,6 +4083,166 @@ function redirectEmailAuthFailure(c: Context, reason: string): Response {
     }),
     302,
   );
+}
+
+type OAuthCallbackFailureStatus = 400 | 401 | 403 | 404 | 409 | 500 | 502 | 503;
+
+interface OAuthCallbackFailureOptions {
+  code: string;
+  message: string;
+  status: OAuthCallbackFailureStatus;
+  redirectUrl?: URL;
+  appState?: string;
+}
+
+function escapeOAuthCallbackHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (character) => {
+    switch (character) {
+      case "&":
+        return "&amp;";
+      case "<":
+        return "&lt;";
+      case ">":
+        return "&gt;";
+      case '"':
+        return "&quot;";
+      default:
+        return "&#39;";
+    }
+  });
+}
+
+function oauthCallbackPrefersHtml(c: Context): boolean {
+  const accept = c.req.header("accept")?.toLowerCase() ?? "";
+  const qualityFor = (target: "application/json" | "text/html"): number | undefined => {
+    const [targetType] = target.split("/");
+    let bestMatch: { specificity: number; quality: number } | undefined;
+    for (const range of accept.split(",")) {
+      const [mediaType, ...parameters] = range.split(";").map((part) => part.trim());
+      const qualityParameter = parameters.find((parameter) => parameter.startsWith("q="));
+      const quality = qualityParameter ? Number(qualityParameter.slice(2)) : 1;
+      const normalizedQuality =
+        Number.isFinite(quality) && quality >= 0 && quality <= 1 ? quality : 0;
+      const specificity =
+        mediaType === target
+          ? 2
+          : mediaType === `${targetType}/*`
+            ? 1
+            : mediaType === "*/*"
+              ? 0
+              : -1;
+      if (
+        specificity >= 0 &&
+        (!bestMatch ||
+          specificity > bestMatch.specificity ||
+          (specificity === bestMatch.specificity && normalizedQuality > bestMatch.quality))
+      ) {
+        bestMatch = { specificity, quality: normalizedQuality };
+      }
+    }
+    return bestMatch?.quality;
+  };
+
+  const htmlQuality = qualityFor("text/html") ?? 0;
+  const jsonQuality = qualityFor("application/json") ?? 0;
+  if (htmlQuality <= 0) return false;
+  if (htmlQuality !== jsonQuality) return htmlQuality > jsonQuality;
+  return c.req.header("sec-fetch-mode")?.toLowerCase() === "navigate";
+}
+
+async function oauthCallbackRecoveryFromStoredState(
+  kind: "oauth" | "oidc",
+  state: string | undefined,
+  providerName: string,
+): Promise<{ redirectUrl: URL; appState?: string } | undefined> {
+  if (!state || state.length > 256) return undefined;
+  try {
+    const rawPayload = await getChallengeStore().get(`${kind}:${state}`);
+    if (!rawPayload) return undefined;
+    const stateData = JSON.parse(rawPayload) as Record<string, unknown>;
+    const storedProvider = kind === "oauth" ? stateData.provider : stateData.providerId;
+    if (storedProvider !== providerName || typeof stateData.redirectUri !== "string") {
+      return undefined;
+    }
+    const tenantId = typeof stateData.tenantId === "string" ? stateData.tenantId : undefined;
+    const clientId = typeof stateData.clientId === "string" ? stateData.clientId : undefined;
+    const redirectUrl = await assertAllowedOAuthRedirectUri(
+      stateData.redirectUri,
+      tenantId,
+      clientId,
+    );
+    return {
+      redirectUrl,
+      appState: typeof stateData.appState === "string" ? stateData.appState : undefined,
+    };
+  } catch {
+    // Recovery is optional. Invalid, stale, or unavailable state must never
+    // replace the original callback failure or create an unvalidated link.
+    return undefined;
+  }
+}
+
+function oauthCallbackFailure(c: Context, options: OAuthCallbackFailureOptions): Response {
+  if (!oauthCallbackPrefersHtml(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: options.message, code: options.code } as ApiResponse & { code: string },
+      options.status,
+    );
+  }
+
+  let recoveryLink = "";
+  if (options.redirectUrl) {
+    const recoveryUrl = new URL(options.redirectUrl);
+    recoveryUrl.searchParams.set("error", options.code);
+    if (options.appState) recoveryUrl.searchParams.set("state", options.appState);
+    recoveryLink = `<a class="stwd-oauth-error__action" href="${escapeOAuthCallbackHtml(
+      recoveryUrl.toString(),
+    )}">Return and try again</a>`;
+  }
+
+  const escapedMessage = escapeOAuthCallbackHtml(options.message);
+  const escapedCode = escapeOAuthCallbackHtml(options.code);
+  const recoveryInstruction = recoveryLink
+    ? recoveryLink
+    : '<p class="stwd-oauth-error__hint">Close this window and restart sign-in from the application.</p>';
+  const body = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign-in could not be completed | Steward</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+    * { box-sizing: border-box; }
+    body { min-height: 100vh; margin: 0; display: grid; place-items: center; padding: 24px; background: #090b10; color: #f6f7fb; }
+    .stwd-oauth-error { width: min(100%, 520px); padding: 32px; border: 1px solid #2a3040; border-radius: 18px; background: #121621; box-shadow: 0 24px 70px rgb(0 0 0 / 35%); }
+    .stwd-oauth-error__eyebrow { margin: 0 0 10px; color: #98a2b8; font-size: 13px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+    h1 { margin: 0; font-size: clamp(24px, 6vw, 34px); line-height: 1.15; }
+    .stwd-oauth-error__message { margin: 18px 0; color: #cbd1de; line-height: 1.6; }
+    .stwd-oauth-error__code { display: inline-block; margin-bottom: 24px; padding: 6px 9px; border-radius: 7px; background: #080a0f; color: #aab4ca; font-size: 12px; }
+    .stwd-oauth-error__action { display: inline-block; padding: 12px 18px; border-radius: 9px; background: #f6f7fb; color: #11141c; font-weight: 750; text-decoration: none; }
+    .stwd-oauth-error__action:focus-visible { outline: 3px solid #7aa2ff; outline-offset: 3px; }
+    .stwd-oauth-error__hint { margin: 0; color: #98a2b8; line-height: 1.5; }
+  </style>
+</head>
+<body>
+  <main class="stwd-oauth-error" data-error-code="${escapedCode}">
+    <p class="stwd-oauth-error__eyebrow">Steward authentication</p>
+    <h1>Sign-in could not be completed</h1>
+    <p class="stwd-oauth-error__message">${escapedMessage}</p>
+    <code class="stwd-oauth-error__code">${escapedCode}</code>
+    <div>${recoveryInstruction}</div>
+  </main>
+</body>
+</html>`;
+
+  return c.html(body, options.status, {
+    "Cache-Control": "no-store",
+    "Content-Security-Policy":
+      "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
+    "Referrer-Policy": "no-referrer",
+    "X-Content-Type-Options": "nosniff",
+  });
 }
 
 // ─── Route group ──────────────────────────────────────────────────────────────
@@ -5076,19 +5284,41 @@ auth.get("/oidc/:provider/callback", async (c) => {
   if (errorParam) {
     // Provider-supplied query text is untrusted and may contain diagnostics or
     // attacker-controlled markup. Do not reflect it to the browser.
-    return c.json<ApiResponse>({ ok: false, error: "OIDC authorization failed" }, 400);
+    const recovery = await oauthCallbackRecoveryFromStoredState("oidc", state, providerId);
+    return oauthCallbackFailure(c, {
+      code: "oidc_authorization_failed",
+      message: "The identity provider did not authorize this sign-in.",
+      status: 400,
+      ...recovery,
+    });
   }
   if (!code || !state) {
-    return c.json<ApiResponse>({ ok: false, error: "code and state are required" }, 400);
+    const recovery = await oauthCallbackRecoveryFromStoredState("oidc", state, providerId);
+    return oauthCallbackFailure(c, {
+      code: "oidc_callback_incomplete",
+      message: "The identity provider returned an incomplete sign-in response.",
+      status: 400,
+      ...recovery,
+    });
   }
   if (code.length > 4_096 || state.length > 256) {
-    return c.json<ApiResponse>({ ok: false, error: "code or state is too long" }, 400);
+    const recovery = await oauthCallbackRecoveryFromStoredState("oidc", state, providerId);
+    return oauthCallbackFailure(c, {
+      code: "oidc_callback_invalid",
+      message: "The identity provider returned an invalid sign-in response.",
+      status: 400,
+      ...recovery,
+    });
   }
 
   const stateKey = `oidc:${state}`;
   const rawPayload = await getChallengeStore().get(stateKey);
   if (!rawPayload) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid or expired OIDC state" }, 401);
+    return oauthCallbackFailure(c, {
+      code: "oidc_state_expired",
+      message: "This sign-in attempt is invalid or has expired.",
+      status: 401,
+    });
   }
 
   let stateData: {
@@ -5105,15 +5335,27 @@ auth.get("/oidc/:provider/callback", async (c) => {
   try {
     stateData = JSON.parse(rawPayload) as typeof stateData;
   } catch {
-    return c.json<ApiResponse>({ ok: false, error: "Malformed OIDC state payload" }, 400);
+    return oauthCallbackFailure(c, {
+      code: "oidc_state_invalid",
+      message: "This sign-in attempt could not be validated.",
+      status: 400,
+    });
   }
   if (stateData.providerId !== providerId) {
-    return c.json<ApiResponse>({ ok: false, error: "Provider mismatch in state" }, 400);
+    return oauthCallbackFailure(c, {
+      code: "oidc_provider_mismatch",
+      message: "The identity provider does not match this sign-in attempt.",
+      status: 400,
+    });
   }
 
   const provider = selectOidcProvider(await getTenantOidcProviders(stateData.tenantId), providerId);
   if (!provider?.clientId || !provider.tokenUrl) {
-    return c.json<ApiResponse>({ ok: false, error: "OIDC provider not found or disabled" }, 404);
+    return oauthCallbackFailure(c, {
+      code: "oidc_provider_unavailable",
+      message: "This identity provider is not available.",
+      status: 404,
+    });
   }
 
   const methodResponse = await requireTenantLoginMethodAllowed(
@@ -5123,7 +5365,13 @@ auth.get("/oidc/:provider/callback", async (c) => {
     provider.id,
     stateData.clientId,
   );
-  if (methodResponse) return methodResponse;
+  if (methodResponse) {
+    return oauthCallbackFailure(c, {
+      code: "oidc_login_disabled",
+      message: "OIDC sign-in is disabled for this application.",
+      status: 403,
+    });
+  }
 
   let redirectUrl: URL;
   try {
@@ -5133,10 +5381,12 @@ auth.get("/oidc/:provider/callback", async (c) => {
       stateData.clientId,
     );
   } catch (err) {
-    return c.json<ApiResponse>(
-      { ok: false, error: err instanceof Error ? err.message : "Invalid redirect_uri" },
-      400,
-    );
+    console.error("[OidcAuth] Callback redirect validation failed", redactedThrownDiagnostics(err));
+    return oauthCallbackFailure(c, {
+      code: "oidc_redirect_invalid",
+      message: "The application return address is not allowed.",
+      status: 400,
+    });
   }
 
   let idToken: string;
@@ -5149,32 +5399,54 @@ auth.get("/oidc/:provider/callback", async (c) => {
       codeVerifier: stateData.codeVerifier,
     });
   } catch (err) {
-    return c.json<ApiResponse>(
-      { ok: false, error: err instanceof Error ? err.message : "OIDC token exchange failed" },
-      502,
-    );
+    console.error("[OidcAuth] Callback token exchange failed", redactedThrownDiagnostics(err));
+    return oauthCallbackFailure(c, {
+      code: "oidc_token_exchange_failed",
+      message: "The identity provider could not complete sign-in. Please try again.",
+      status: 502,
+      redirectUrl,
+      appState: stateData.appState,
+    });
   }
 
   try {
     const verified = await verifyOidcJwt(stateData.tenantId, provider, idToken);
     if (verified.claims.nonce !== stateData.nonce) {
-      return c.json<ApiResponse>({ ok: false, error: "OIDC nonce mismatch" }, 401);
+      return oauthCallbackFailure(c, {
+        code: "oidc_nonce_mismatch",
+        message: "This sign-in response could not be matched to your browser.",
+        status: 401,
+        redirectUrl,
+        appState: stateData.appState,
+      });
     }
     if (!verified.email || verified.emailVerified !== true) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "Enterprise OIDC SSO requires a verified email claim" },
-        403,
-      );
+      return oauthCallbackFailure(c, {
+        code: "oidc_verified_email_required",
+        message: "Enterprise OIDC sign-in requires a verified email address.",
+        status: 403,
+        redirectUrl,
+        appState: stateData.appState,
+      });
     }
     if (!(await isVerifiedSsoEmailDomainForTenant(stateData.tenantId, verified.email))) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "Enterprise OIDC SSO email domain is not verified for this tenant" },
-        403,
-      );
+      return oauthCallbackFailure(c, {
+        code: "oidc_email_domain_unverified",
+        message: "Your email domain is not approved for this organization.",
+        status: 403,
+        redirectUrl,
+        appState: stateData.appState,
+      });
     }
     const consumedPayload = await getChallengeStore().consume(stateKey);
     if (consumedPayload !== rawPayload) {
-      return c.json<ApiResponse>({ ok: false, error: "Invalid or already-used OIDC state" }, 401);
+      return oauthCallbackFailure(c, {
+        code: "oidc_state_consumed",
+        message: "This sign-in attempt is invalid or has already been used.",
+        status: 401,
+        redirectUrl,
+        appState: stateData.appState,
+      });
     }
     await withPreAuthTenant(stateData.tenantId, "oidc-callback-authorization-audit", () =>
       writeAuditEvent({
@@ -5206,16 +5478,31 @@ auth.get("/oidc/:provider/callback", async (c) => {
       tenantRole: "viewer",
     });
     if (!result.ok) {
-      redirectUrl.searchParams.set("error", result.error);
-      return c.redirect(redirectUrl.toString(), 302);
+      return oauthCallbackFailure(c, {
+        code: "oidc_account_provisioning_failed",
+        message: "Your account could not be prepared for sign-in.",
+        status: result.status ?? 500,
+        redirectUrl,
+        appState: stateData.appState,
+      });
     }
     if (result.response.ok === false) {
-      redirectUrl.searchParams.set("error", String(result.response.error || "auth_failed"));
-      return c.redirect(redirectUrl.toString(), 302);
+      return oauthCallbackFailure(c, {
+        code: "oidc_authentication_failed",
+        message: "Sign-in could not be completed.",
+        status: 403,
+        redirectUrl,
+        appState: stateData.appState,
+      });
     }
     if (result.response.mfaRequired) {
-      redirectUrl.searchParams.set("error", "mfa_required");
-      return c.redirect(redirectUrl.toString(), 302);
+      return oauthCallbackFailure(c, {
+        code: "mfa_required",
+        message: "Additional verification is required to complete sign-in.",
+        status: 403,
+        redirectUrl,
+        appState: stateData.appState,
+      });
     }
 
     const exchangeCode = randomBase64Url(32);
@@ -5238,13 +5525,14 @@ auth.get("/oidc/:provider/callback", async (c) => {
     setRedirectFragment(redirectUrl, { code: exchangeCode, state: stateData.appState });
     return c.redirect(redirectUrl.toString(), 302);
   } catch (err) {
-    return c.json<ApiResponse>(
-      {
-        ok: false,
-        error: err instanceof Error ? err.message : "OIDC token verification failed",
-      },
-      401,
-    );
+    console.error("[OidcAuth] Callback verification failed", redactedThrownDiagnostics(err));
+    return oauthCallbackFailure(c, {
+      code: "oidc_token_verification_failed",
+      message: "The identity provider response could not be verified.",
+      status: 401,
+      redirectUrl,
+      appState: stateData.appState,
+    });
   }
 });
 
@@ -7365,26 +7653,31 @@ auth.post("/mfa/passkey/options", async (c) => {
   );
   if (methodResponse) return methodResponse;
 
+  const passkeyAuth = getPasskeyAuth(c.req.header("origin"));
   const passkeys = await getDb()
     .select({
       credentialId: authenticators.credentialId,
+      rpId: authenticators.rpId,
       transports: authenticators.transports,
     })
     .from(authenticators)
     .where(eq(authenticators.userId, session.payload.userId));
-  if (passkeys.length === 0) {
+  // Explicitly cross-RP credentials cannot satisfy this RP's WebAuthn
+  // challenge. Legacy NULL provenance stays eligible so the browser can
+  // adjudicate it, and a successful assertion will safely backfill the RP.
+  const eligiblePasskeys = passkeys.filter(
+    (credential) => credential.rpId === null || credential.rpId === passkeyAuth.rpID,
+  );
+  if (eligiblePasskeys.length === 0) {
     return c.json<ApiResponse>({ ok: false, error: "No passkey is registered for this user" }, 404);
   }
 
-  const options = await getPasskeyAuth(c.req.header("origin")).generateAuthenticationOptions(
-    `mfa:${session.payload.userId}`,
-    {
-      allowCredentials: passkeys.map((credential) => ({
-        id: credential.credentialId,
-        transports: (credential.transports ?? []) as never[],
-      })),
-    },
-  );
+  const options = await passkeyAuth.generateAuthenticationOptions(`mfa:${session.payload.userId}`, {
+    allowCredentials: eligiblePasskeys.map((credential) => ({
+      id: credential.credentialId,
+      transports: (credential.transports ?? []) as never[],
+    })),
+  });
   const challengeId = options.challenge;
   await getChallengeStore().set(
     passkeyMfaChallengeKey(session.payload.userId, challengeId),
@@ -7440,6 +7733,11 @@ const completePasskeyMfaHandler = async (c: Context) => {
     return c.json<ApiResponse>({ ok: false, error: "Passkey MFA verification failed" }, 401);
   }
 
+  const passkeyAuth = getPasskeyAuth(c.req.header("origin"));
+  if (cred.rpId !== null && cred.rpId !== passkeyAuth.rpID) {
+    return c.json<ApiResponse>({ ok: false, error: "Passkey MFA verification failed" }, 401);
+  }
+
   let verification: Awaited<ReturnType<PasskeyAuth["verifyAuthentication"]>>;
   try {
     const challengeKey = passkeyMfaChallengeKey(session.payload.userId, body.challengeId);
@@ -7447,7 +7745,7 @@ const completePasskeyMfaHandler = async (c: Context) => {
     if (!expectedChallenge) {
       return c.json<ApiResponse>({ ok: false, error: "Invalid or expired passkey challenge" }, 401);
     }
-    verification = await getPasskeyAuth(c.req.header("origin")).verifyAuthentication(
+    verification = await passkeyAuth.verifyAuthentication(
       body.response as unknown as Parameters<PasskeyAuth["verifyAuthentication"]>[0],
       expectedChallenge,
       cred.credentialPublicKey,
@@ -7480,7 +7778,11 @@ const completePasskeyMfaHandler = async (c: Context) => {
 
   const updatedMfaCounters = await getDb()
     .update(authenticators)
-    .set({ counter: verification.authenticationInfo.newCounter })
+    .set({
+      counter: verification.authenticationInfo.newCounter,
+      // A verified assertion proves a legacy credential's RP provenance.
+      ...(cred.rpId === null ? { rpId: passkeyAuth.rpID } : {}),
+    })
     .where(and(eq(authenticators.id, cred.id), eq(authenticators.counter, cred.counter)))
     .returning({ id: authenticators.id });
   if (updatedMfaCounters.length !== 1) {
@@ -7962,8 +8264,9 @@ auth.delete("/sessions", async (c) => {
 
 /**
  * POST /passkey/register/options
- * Body: { email }
- * Finds or creates user, returns WebAuthn registration options.
+ * Body: { email, emailGrant? }
+ * Verified-email enrollment returns 409 when the account already has a
+ * passkey for this RP, while authenticated sessions can add devices.
  */
 auth.post("/passkey/register/options", async (c) => {
   // Pre-auth reachable via the email-grant path — rate limit like the other
@@ -7986,6 +8289,9 @@ auth.post("/passkey/register/options", async (c) => {
   }
   const email = body.email.toLowerCase().trim();
   const db = getDb();
+  const emailGrant =
+    typeof body.emailGrant === "string" && body.emailGrant.length > 0 ? body.emailGrant : null;
+  const usingEmailGrant = emailGrant !== null;
 
   // Two ways in: an authenticated session (add-passkey for logged-in users)
   // or a verified-email grant from /email/otp/verify (Privy-style signup:
@@ -7995,14 +8301,14 @@ auth.post("/passkey/register/options", async (c) => {
   let userEmail: string | null;
   let ssoTenantId: string;
 
-  if (typeof body.emailGrant === "string" && body.emailGrant.length > 0) {
+  if (emailGrant !== null) {
     const resolvedTenantId =
-      c.req.header("X-Steward-Tenant")?.trim() || body.tenantId?.trim() || _DEFAULT_TENANT_ID;
+      c.req.header("X-Steward-Tenant")?.trim() || body.tenantId?.trim() || defaultAuthTenantId();
     const methodResponse = await requireTenantLoginMethodAllowed(c, resolvedTenantId, "passkey");
     if (methodResponse) return methodResponse;
     // Peek (not consume): the grant is only burned at register/verify so a
     // cancelled Touch ID prompt doesn't cost the user their verification.
-    const grantOk = await peekEmailGrant(body.emailGrant, email, resolvedTenantId);
+    const grantOk = await peekEmailGrant(emailGrant, email, resolvedTenantId);
     if (!grantOk) {
       return c.json<ApiResponse>({ ok: false, error: "Invalid or expired email grant" }, 401);
     }
@@ -8054,20 +8360,44 @@ auth.post("/passkey/register/options", async (c) => {
   );
   if (ssoRequiredResponse) return ssoRequiredResponse;
 
+  const passkeyAuth = getPasskeyAuth(c.req.header("origin"));
   const existingCreds = await db
-    .select({ credentialId: authenticators.credentialId })
+    .select({
+      credentialId: authenticators.credentialId,
+      rpId: authenticators.rpId,
+    })
     .from(authenticators)
     .where(eq(authenticators.userId, userId));
+
+  // The verified-email path exists to establish the account's first passkey.
+  // Only provenance that explicitly matches the current RP can trigger the
+  // recovery signal. A cross-RP credential must not block registration here,
+  // and a legacy NULL row is ambiguous: keep it in excludeCredentials so the
+  // browser can safely adjudicate whether it belongs to this RP.
+  if (usingEmailGrant && existingCreds.some((cred) => cred.rpId === passkeyAuth.rpID)) {
+    return c.json<ApiResponse & { code: "passkey_already_registered" }>(
+      {
+        ok: false,
+        error: "A passkey already exists for this email. Sign in with it instead.",
+        code: "passkey_already_registered",
+      },
+      409,
+    );
+  }
+
+  const sameOrLegacyCreds = existingCreds.filter(
+    (cred) => cred.rpId === null || cred.rpId === passkeyAuth.rpID,
+  );
 
   const attachment =
     body.authenticatorAttachment === "platform" || body.authenticatorAttachment === "cross-platform"
       ? body.authenticatorAttachment
       : undefined;
 
-  const options = await getPasskeyAuth(c.req.header("origin")).generateRegistrationOptions(
+  const options = await passkeyAuth.generateRegistrationOptions(
     userId,
     userEmail ?? email,
-    existingCreds.map((cred) => cred.credentialId),
+    sameOrLegacyCreds.map((cred) => cred.credentialId),
     attachment ? { authenticatorAttachment: attachment } : undefined,
   );
 
@@ -8118,7 +8448,7 @@ auth.post("/passkey/register/verify", async (c) => {
     // user's OTP verification, while consumption before any state change
     // keeps it strictly single-use.
     grantTenantId =
-      c.req.header("X-Steward-Tenant")?.trim() || body.tenantId?.trim() || _DEFAULT_TENANT_ID;
+      c.req.header("X-Steward-Tenant")?.trim() || body.tenantId?.trim() || defaultAuthTenantId();
     const grantOk = await peekEmailGrant(body.emailGrant as string, email, grantTenantId);
     if (!grantOk) {
       return c.json<ApiResponse>({ ok: false, error: "Invalid or expired email grant" }, 401);
@@ -8168,9 +8498,10 @@ auth.post("/passkey/register/verify", async (c) => {
   const ssoRequiredResponse = await requireNonSsoEmailLoginAllowed(c, tenantId, email, "Passkey");
   if (ssoRequiredResponse) return ssoRequiredResponse;
 
+  const passkeyAuth = getPasskeyAuth(c.req.header("origin"));
   let verification: Awaited<ReturnType<PasskeyAuth["verifyRegistration"]>>;
   try {
-    verification = await getPasskeyAuth(c.req.header("origin")).verifyRegistration(
+    verification = await passkeyAuth.verifyRegistration(
       user.id,
       body.response as unknown as Parameters<PasskeyAuth["verifyRegistration"]>[1],
     );
@@ -8210,6 +8541,7 @@ auth.post("/passkey/register/verify", async (c) => {
       userId: user.id,
       credentialId: credential.id,
       credentialPublicKey: uint8ArrayToBase64url(credential.publicKey),
+      rpId: passkeyAuth.rpID,
       counter: credential.counter,
       credentialDeviceType,
       credentialBackedUp,
@@ -8362,6 +8694,11 @@ auth.post("/passkey/login/verify", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Passkey authentication failed" }, 401);
   }
 
+  const passkeyAuth = getPasskeyAuth(c.req.header("origin"));
+  if (cred.rpId !== null && cred.rpId !== passkeyAuth.rpID) {
+    return c.json<ApiResponse>({ ok: false, error: "Passkey authentication failed" }, 401);
+  }
+
   let verification: Awaited<ReturnType<PasskeyAuth["verifyAuthentication"]>>;
   try {
     const expectedChallenge = await getChallengeStore().consume(
@@ -8370,7 +8707,7 @@ auth.post("/passkey/login/verify", async (c) => {
     if (!expectedChallenge) {
       return c.json<ApiResponse>({ ok: false, error: "Passkey authentication failed" }, 401);
     }
-    verification = await getPasskeyAuth(c.req.header("origin")).verifyAuthentication(
+    verification = await passkeyAuth.verifyAuthentication(
       body.response as unknown as Parameters<PasskeyAuth["verifyAuthentication"]>[0],
       expectedChallenge,
       cred.credentialPublicKey,
@@ -8405,7 +8742,11 @@ auth.post("/passkey/login/verify", async (c) => {
   // Update counter to prevent replay attacks
   const updatedCounters = await db
     .update(authenticators)
-    .set({ counter: verification.authenticationInfo.newCounter })
+    .set({
+      counter: verification.authenticationInfo.newCounter,
+      // A verified assertion proves a legacy credential's RP provenance.
+      ...(cred.rpId === null ? { rpId: passkeyAuth.rpID } : {}),
+    })
     .where(and(eq(authenticators.id, cred.id), eq(authenticators.counter, cred.counter)))
     .returning({ id: authenticators.id });
   if (updatedCounters.length !== 1) {
@@ -8479,7 +8820,7 @@ auth.post("/email/send", async (c) => {
   const email = body.email.toLowerCase().trim();
   const headerTenantId = c.req.header("X-Steward-Tenant")?.trim();
   const bodyTenantId = body.tenantId?.trim();
-  const resolvedTenantId = headerTenantId || bodyTenantId || _DEFAULT_TENANT_ID;
+  const resolvedTenantId = headerTenantId || bodyTenantId || defaultAuthTenantId();
   const tenantHintError = await validateExplicitAuthTenantHint(
     resolvedTenantId,
     Boolean(headerTenantId || bodyTenantId),
@@ -8561,7 +8902,7 @@ auth.get("/callback/email", async (c) => {
   }
 
   const email = emailParam.toLowerCase().trim();
-  const resolvedTenantId = tenantId || _DEFAULT_TENANT_ID;
+  const resolvedTenantId = tenantId || defaultAuthTenantId();
   const methodResponse = await requireTenantLoginMethodAllowed(c, resolvedTenantId, "email");
   if (methodResponse) return redirectEmailAuthFailure(c, "method_disabled");
   const ssoRequiredResponse = await requireNonSsoEmailLoginAllowed(
@@ -8660,7 +9001,7 @@ auth.post("/email/verify", async (c) => {
   const email = body.email.toLowerCase().trim();
   const headerTenantId = c.req.header("X-Steward-Tenant")?.trim();
   const bodyTenantId = body.tenantId?.trim();
-  const resolvedTenantId = headerTenantId || bodyTenantId || _DEFAULT_TENANT_ID;
+  const resolvedTenantId = headerTenantId || bodyTenantId || defaultAuthTenantId();
   const tenantHintError = await validateExplicitAuthTenantHint(
     resolvedTenantId,
     Boolean(headerTenantId || bodyTenantId),
@@ -8724,7 +9065,8 @@ auth.post("/email/code/verify", async (c) => {
 
   const email = body.email.toLowerCase().trim();
   const code = body.code.trim();
-  const resolvedTenantId = c.req.header("X-Steward-Tenant") || body.tenantId || _DEFAULT_TENANT_ID;
+  const resolvedTenantId =
+    c.req.header("X-Steward-Tenant") || body.tenantId || defaultAuthTenantId();
   const methodResponse = await requireTenantLoginMethodAllowed(c, resolvedTenantId, "email");
   if (methodResponse) return methodResponse;
   const ssoRequiredResponse = await requireNonSsoEmailLoginAllowed(
@@ -8789,7 +9131,7 @@ auth.post("/email/status", async (c) => {
   }
   const headerTenantId = c.req.header("X-Steward-Tenant")?.trim();
   const bodyTenantId = body.tenantId?.trim();
-  const resolvedTenantId = headerTenantId || bodyTenantId || _DEFAULT_TENANT_ID;
+  const resolvedTenantId = headerTenantId || bodyTenantId || defaultAuthTenantId();
   const tenantHintError = await validateExplicitAuthTenantHint(
     resolvedTenantId,
     Boolean(headerTenantId || bodyTenantId),
@@ -8836,7 +9178,7 @@ auth.post("/email/otp/send", async (c) => {
   const email = body.email.toLowerCase().trim();
   const headerTenantId = c.req.header("X-Steward-Tenant")?.trim();
   const bodyTenantId = body.tenantId?.trim();
-  const resolvedTenantId = headerTenantId || bodyTenantId || _DEFAULT_TENANT_ID;
+  const resolvedTenantId = headerTenantId || bodyTenantId || defaultAuthTenantId();
   const tenantHintError = await validateExplicitAuthTenantHint(
     resolvedTenantId,
     Boolean(headerTenantId || bodyTenantId),
@@ -8911,7 +9253,8 @@ auth.post("/email/otp/verify", async (c) => {
 
   const email = body.email.toLowerCase().trim();
   const code = body.code.trim();
-  const resolvedTenantId = c.req.header("X-Steward-Tenant") || body.tenantId || _DEFAULT_TENANT_ID;
+  const resolvedTenantId =
+    c.req.header("X-Steward-Tenant") || body.tenantId || defaultAuthTenantId();
   const methodResponse = await requireTenantLoginMethodAllowed(c, resolvedTenantId, "email");
   if (methodResponse) return methodResponse;
   const ssoRequiredResponse = await requireNonSsoEmailLoginAllowed(
@@ -8994,7 +9337,7 @@ async function resolveGuestTenant(
   const requested =
     headerTenant ||
     (typeof bodyTenantId === "string" ? bodyTenantId.trim() : "") ||
-    _DEFAULT_TENANT_ID;
+    defaultAuthTenantId();
 
   if (!isValidTenantId(requested)) {
     return { ok: false, status: 400, error: "Invalid tenant id format" };
@@ -9006,7 +9349,7 @@ async function resolveGuestTenant(
   if (!subject) {
     return { ok: false, status: 404, error: `Tenant '${requested}' not found` };
   }
-  if (requested === _DEFAULT_TENANT_ID) {
+  if (requested === defaultAuthTenantId()) {
     return { ok: true, tenantId: requested, isPersonal: false };
   }
   if (subject.join_mode === "open") {
@@ -9490,15 +9833,33 @@ auth.get("/oauth/:provider/callback", async (c) => {
   const errorParam = c.req.query("error");
 
   if (errorParam) {
-    return c.json<ApiResponse>({ ok: false, error: `OAuth error: ${errorParam}` }, 400);
+    // Provider-controlled text may contain markup, credentials, or diagnostics.
+    // Keep the browser response stable and non-reflective.
+    const recovery = await oauthCallbackRecoveryFromStoredState("oauth", state, providerName);
+    return oauthCallbackFailure(c, {
+      code: "oauth_authorization_failed",
+      message: "The provider did not authorize this sign-in.",
+      status: 400,
+      ...recovery,
+    });
   }
 
   if (!isBuiltInProvider(providerName)) {
-    return c.json<ApiResponse>({ ok: false, error: `Unknown provider: ${providerName}` }, 400);
+    return oauthCallbackFailure(c, {
+      code: "oauth_provider_unknown",
+      message: "This sign-in provider is not supported.",
+      status: 400,
+    });
   }
 
   if (!code || !state) {
-    return c.json<ApiResponse>({ ok: false, error: "code and state are required" }, 400);
+    const recovery = await oauthCallbackRecoveryFromStoredState("oauth", state, providerName);
+    return oauthCallbackFailure(c, {
+      code: "oauth_callback_incomplete",
+      message: "The provider returned an incomplete sign-in response.",
+      status: 400,
+      ...recovery,
+    });
   }
 
   // Load state before provider calls, then consume it only after provider token
@@ -9507,7 +9868,11 @@ auth.get("/oauth/:provider/callback", async (c) => {
   const stateKey = `oauth:${state}`;
   const rawPayload = await getChallengeStore().get(stateKey);
   if (!rawPayload) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid or expired OAuth state" }, 401);
+    return oauthCallbackFailure(c, {
+      code: "oauth_state_expired",
+      message: "This sign-in attempt is invalid or has expired.",
+      status: 401,
+    });
   }
 
   let stateData: {
@@ -9525,11 +9890,19 @@ auth.get("/oauth/:provider/callback", async (c) => {
   try {
     stateData = JSON.parse(rawPayload) as typeof stateData;
   } catch {
-    return c.json<ApiResponse>({ ok: false, error: "Malformed OAuth state payload" }, 400);
+    return oauthCallbackFailure(c, {
+      code: "oauth_state_invalid",
+      message: "This sign-in attempt could not be validated.",
+      status: 400,
+    });
   }
 
   if (stateData.provider !== providerName) {
-    return c.json<ApiResponse>({ ok: false, error: "Provider mismatch in state" }, 400);
+    return oauthCallbackFailure(c, {
+      code: "oauth_provider_mismatch",
+      message: "The provider does not match this sign-in attempt.",
+      status: 400,
+    });
   }
   const methodResponse = await requireTenantLoginMethodAllowed(
     c,
@@ -9538,7 +9911,13 @@ auth.get("/oauth/:provider/callback", async (c) => {
     providerName,
     stateData.clientId,
   );
-  if (methodResponse) return methodResponse;
+  if (methodResponse) {
+    return oauthCallbackFailure(c, {
+      code: "oauth_login_disabled",
+      message: "OAuth sign-in is disabled for this application.",
+      status: 403,
+    });
+  }
 
   let redirectUrl: URL;
   try {
@@ -9548,26 +9927,29 @@ auth.get("/oauth/:provider/callback", async (c) => {
       stateData.clientId,
     );
   } catch (err) {
-    return c.json<ApiResponse>(
-      {
-        ok: false,
-        error: err instanceof Error ? err.message : "Invalid redirect_uri",
-      },
-      400,
+    console.error(
+      "[OAuthAuth] Callback redirect validation failed",
+      redactedThrownDiagnostics(err),
     );
+    return oauthCallbackFailure(c, {
+      code: "oauth_redirect_invalid",
+      message: "The application return address is not allowed.",
+      status: 400,
+    });
   }
 
   let oauthClient: OAuthClient;
   try {
     oauthClient = new OAuthClient(getProviderConfig(providerName));
   } catch (err) {
-    return c.json<ApiResponse>(
-      {
-        ok: false,
-        error: err instanceof Error ? err.message : "Provider not configured",
-      },
-      503,
-    );
+    console.error("[OAuthAuth] Callback provider setup failed", redactedThrownDiagnostics(err));
+    return oauthCallbackFailure(c, {
+      code: "oauth_provider_unavailable",
+      message: "This sign-in provider is not available.",
+      status: 503,
+      redirectUrl,
+      appState: stateData.appState,
+    });
   }
 
   const callbackUrl = buildOAuthCallbackUrl(c, providerName);
@@ -9580,13 +9962,14 @@ auth.get("/oauth/:provider/callback", async (c) => {
   try {
     tokenResponse = await oauthClient.exchangeCode(code, callbackUrl, stateData.codeVerifier);
   } catch (err) {
-    return c.json<ApiResponse>(
-      {
-        ok: false,
-        error: err instanceof Error ? err.message : "Token exchange failed",
-      },
-      502,
-    );
+    console.error("[OAuthAuth] Callback token exchange failed", redactedThrownDiagnostics(err));
+    return oauthCallbackFailure(c, {
+      code: "oauth_token_exchange_failed",
+      message: "The provider could not complete sign-in. Please try again.",
+      status: 502,
+      redirectUrl,
+      appState: stateData.appState,
+    });
   }
 
   // Fetch user info from provider
@@ -9594,13 +9977,14 @@ auth.get("/oauth/:provider/callback", async (c) => {
   try {
     providerUser = await oauthClient.getUserInfo(tokenResponse.access_token);
   } catch (err) {
-    return c.json<ApiResponse>(
-      {
-        ok: false,
-        error: err instanceof Error ? err.message : "Failed to fetch user info",
-      },
-      502,
-    );
+    console.error("[OAuthAuth] Callback profile fetch failed", redactedThrownDiagnostics(err));
+    return oauthCallbackFailure(c, {
+      code: "oauth_profile_fetch_failed",
+      message: "The provider profile could not be loaded. Please try again.",
+      status: 502,
+      redirectUrl,
+      appState: stateData.appState,
+    });
   }
 
   // Twitter and some providers do not return an email address.
@@ -9608,10 +9992,13 @@ auth.get("/oauth/:provider/callback", async (c) => {
   // This email is never displayed or sent — it is purely an internal identity key.
   if (!providerUser.email) {
     if (!providerUser.id) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "Provider returned neither email nor user ID" },
-        400,
-      );
+      return oauthCallbackFailure(c, {
+        code: "oauth_identity_incomplete",
+        message: "The provider did not return enough account information.",
+        status: 400,
+        redirectUrl,
+        appState: stateData.appState,
+      });
     }
     providerUser = {
       ...providerUser,
@@ -9622,7 +10009,13 @@ auth.get("/oauth/:provider/callback", async (c) => {
 
   const consumedPayload = await getChallengeStore().consume(stateKey);
   if (consumedPayload !== rawPayload) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid or already-used OAuth state" }, 401);
+    return oauthCallbackFailure(c, {
+      code: "oauth_state_consumed",
+      message: "This sign-in attempt is invalid or has already been used.",
+      status: 401,
+      redirectUrl,
+      appState: stateData.appState,
+    });
   }
 
   // Create/find user + provision wallet + link tenant
@@ -9635,17 +10028,39 @@ auth.get("/oauth/:provider/callback", async (c) => {
   });
 
   if (!result.ok) {
-    return c.json<ApiResponse>({ ok: false, error: result.error }, result.status ?? 500);
+    const isUnverifiedEmail =
+      result.error === "Provider email must be verified before OAuth sign-in is allowed";
+    return oauthCallbackFailure(c, {
+      code: isUnverifiedEmail
+        ? "oauth_verified_email_required"
+        : "oauth_account_provisioning_failed",
+      message: isUnverifiedEmail
+        ? "Provider email must be verified before OAuth sign-in is allowed."
+        : "Your account could not be prepared for sign-in.",
+      status: result.status ?? 500,
+      redirectUrl,
+      appState: stateData.appState,
+    });
   }
 
   if (result.response.ok === false) {
-    redirectUrl.searchParams.set("error", String(result.response.error || "auth_failed"));
-    return c.redirect(redirectUrl.toString(), 302);
+    return oauthCallbackFailure(c, {
+      code: "oauth_authentication_failed",
+      message: "Sign-in could not be completed.",
+      status: 403,
+      redirectUrl,
+      appState: stateData.appState,
+    });
   }
 
   if (result.response.mfaRequired) {
-    redirectUrl.searchParams.set("error", "mfa_required");
-    return c.redirect(redirectUrl.toString(), 302);
+    return oauthCallbackFailure(c, {
+      code: "mfa_required",
+      message: "Additional verification is required to complete sign-in.",
+      status: 403,
+      redirectUrl,
+      appState: stateData.appState,
+    });
   }
 
   // Nonce-exchange path: issue a one-time, short-lived (60s) code that the
@@ -10627,7 +11042,7 @@ async function getAllowedOAuthRedirectEntries(
   clientId?: string,
 ): Promise<string[]> {
   const explicitTenantId = tenantId?.trim() || undefined;
-  const resolvedTenantId = explicitTenantId || _DEFAULT_TENANT_ID;
+  const resolvedTenantId = explicitTenantId || defaultAuthTenantId();
   const entries = new Set<string>();
 
   const normalizedClientId = normalizePublicClientId(clientId);

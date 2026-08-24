@@ -43,7 +43,7 @@ describe("wallet nonce binding hardening", () => {
     expect(exchange).toBeGreaterThan(stateLoad);
     expect(userInfo).toBeGreaterThan(exchange);
     expect(consume).toBeGreaterThan(userInfo);
-    expect(callbackRoute).toContain("Invalid or already-used OAuth state");
+    expect(callbackRoute).toContain('code: "oauth_state_consumed"');
   });
 
   it("binds Sign in with Apple id_tokens to an authorize-request nonce", () => {
