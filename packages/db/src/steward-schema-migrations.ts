@@ -10,8 +10,9 @@ const ADVISORY_LOCK_KEY = "steward_schema_release_migrations";
 export const STEWARD_SCHEMA_MIGRATIONS_TABLE = "__steward_release_migrations";
 /**
  * Opt-in identifier for a readiness *component*. This marker proves the
- * schema-aware bootstrap migration only; it is not evidence that core
- * migrations 0084-0110 were applied and must not replace that baseline gate.
+ * schema-aware bootstrap and additive RP-provenance migrations only; it is
+ * not evidence that the core repair range was applied and must not replace
+ * that baseline gate.
  */
 export const STEWARD_SCHEMA_MIGRATIONS_MODE = "steward-owned";
 export const STEWARD_SCHEMA_MIGRATION_STATUS_FUNCTION =
@@ -22,6 +23,7 @@ const BOOTSTRAP_END = 'REVOKE ALL ON ALL FUNCTIONS IN SCHEMA "steward_bootstrap"
 
 const REQUIRED_BOOTSTRAP_RELATIONS = [
   "agents",
+  "authenticators",
   "refresh_tokens",
   "session_signers",
   "tenant_app_client_secrets",
@@ -66,11 +68,14 @@ type AppliedMarker = {
   created_at: string | number;
 };
 
-const RELEASE_MIGRATION_TAG = "0000_auth_bootstrap_0111_0113";
-const RELEASE_MIGRATION_CREATED_AT = 1_787_220_000_001;
+const BOOTSTRAP_MIGRATION_TAG = "0000_auth_bootstrap_0111_0113";
+const BOOTSTRAP_MIGRATION_CREATED_AT = 1_787_220_000_001;
+const PASSKEY_RP_PROVENANCE_MIGRATION_TAG = "0001_passkey_rp_provenance_0114";
+const PASSKEY_RP_PROVENANCE_MIGRATION_CREATED_AT = 1_787_529_855_001;
 
 let cachedSource: string | undefined;
-let cachedExpectation: StewardSchemaMigrationExpectation | undefined;
+let cachedRpProvenanceSource: string | undefined;
+let cachedExpectations: StewardSchemaMigrationExpectation[] | undefined;
 
 function readCoreMigration(tag: string): string {
   return readFileSync(`${CORE_MIGRATIONS_FOLDER}/${tag}.sql`, "utf8");
@@ -103,16 +108,43 @@ export function getStewardSchemaMigrationSource(): string {
   return cachedSource;
 }
 
+/** Return the immutable core migration that added passkey RP provenance. */
+export function getStewardPasskeyRpProvenanceMigrationSource(): string {
+  if (cachedRpProvenanceSource) return cachedRpProvenanceSource;
+  cachedRpProvenanceSource = readCoreMigration("0114_passkey_rp_provenance");
+  return cachedRpProvenanceSource;
+}
+
+/** Return every schema-owned marker required by this release, in apply order. */
+export function getStewardSchemaMigrationExpectations(): StewardSchemaMigrationExpectation[] {
+  if (cachedExpectations) return cachedExpectations.map((entry) => ({ ...entry }));
+  const sources = [
+    {
+      tag: BOOTSTRAP_MIGRATION_TAG,
+      createdAt: BOOTSTRAP_MIGRATION_CREATED_AT,
+      source: getStewardSchemaMigrationSource(),
+    },
+    {
+      tag: PASSKEY_RP_PROVENANCE_MIGRATION_TAG,
+      createdAt: PASSKEY_RP_PROVENANCE_MIGRATION_CREATED_AT,
+      source: getStewardPasskeyRpProvenanceMigrationSource(),
+    },
+  ];
+  cachedExpectations = sources.map(({ tag, createdAt, source }, index) => ({
+    tag,
+    hash: createHash("sha256").update(source).digest("hex"),
+    createdAt,
+    count: index + 1,
+  }));
+  return cachedExpectations.map((entry) => ({ ...entry }));
+}
+
+/** Return the required schema-owned migration tip for readiness diagnostics. */
 export function getStewardSchemaMigrationExpectation(): StewardSchemaMigrationExpectation {
-  if (cachedExpectation) return cachedExpectation;
-  const hash = createHash("sha256").update(getStewardSchemaMigrationSource()).digest("hex");
-  cachedExpectation = {
-    tag: RELEASE_MIGRATION_TAG,
-    hash,
-    createdAt: RELEASE_MIGRATION_CREATED_AT,
-    count: 1,
-  };
-  return cachedExpectation;
+  const expectations = getStewardSchemaMigrationExpectations();
+  const tip = expectations.at(-1);
+  if (!tip) throw new Error("Steward schema migration manifest is empty");
+  return { ...tip, count: expectations.length };
 }
 
 function quoteIdentifier(identifier: string): string {
@@ -130,7 +162,8 @@ export function renderStewardSchemaMigration(source: string, schema: string): st
   const quotedSchema = quoteIdentifier(schema);
   return source
     .replaceAll("public.", `${quotedSchema}.`)
-    .replaceAll('"public".', `${quotedSchema}.`);
+    .replaceAll('"public".', `${quotedSchema}.`)
+    .replaceAll('ALTER TABLE "authenticators"', `ALTER TABLE ${quotedSchema}."authenticators"`);
 }
 
 function assertSafeDataSchema(schema: string): void {
@@ -181,42 +214,88 @@ async function assertBootstrapRelations(
   }
 }
 
-function assertAppliedMarkers(
+function validateAppliedMarkers(
   rows: AppliedMarker[],
-  expectation: StewardSchemaMigrationExpectation,
-): boolean {
-  if (rows.length === 0) return false;
-  const first = rows[0];
-  if (
-    !first ||
-    Number(first.migration_order) !== 1 ||
-    first.tag !== expectation.tag ||
-    first.hash !== expectation.hash ||
-    Number(first.created_at) !== expectation.createdAt
-  ) {
-    throw new Error(
-      "Steward-owned migration ledger does not contain the exact expected bootstrap marker",
-    );
-  }
-  // A newer release may append markers. An older image must remain readable
-  // after rollback, so a valid exact prefix plus an unknown forward suffix is
-  // accepted without rewriting or deleting it.
-  let previousCreatedAt = expectation.createdAt;
-  for (let index = 1; index < rows.length; index += 1) {
+  expectations: StewardSchemaMigrationExpectation[],
+): number {
+  if (rows.length === 0) return 0;
+  let previousCreatedAt = 0;
+  for (let index = 0; index < rows.length; index += 1) {
     const row = rows[index];
     const createdAt = Number(row?.created_at);
     if (
       Number(row?.migration_order) !== index + 1 ||
       !row?.tag ||
+      !/^[a-z0-9_]+$/.test(row.tag) ||
       !/^[0-9a-f]{64}$/.test(row.hash) ||
       !Number.isSafeInteger(createdAt) ||
       createdAt <= previousCreatedAt
     ) {
       throw new Error("Steward-owned migration ledger has an invalid forward suffix");
     }
+    const expected = expectations[index];
+    if (
+      expected &&
+      (row.tag !== expected.tag || row.hash !== expected.hash || createdAt !== expected.createdAt)
+    ) {
+      throw new Error(
+        `Steward-owned migration ledger does not contain the exact expected release marker at order ${index + 1}`,
+      );
+    }
     previousCreatedAt = createdAt;
   }
+  return Math.min(rows.length, expectations.length);
+}
+
+type RpProvenanceColumn = {
+  data_type: string;
+  character_maximum_length: string | number | null;
+  is_nullable: string;
+  column_default: string | null;
+};
+
+async function rpProvenanceColumnExists(
+  transaction: StewardSchemaMigrationExecutor,
+  schema: string,
+): Promise<boolean> {
+  const rows = await transaction.unsafe<RpProvenanceColumn>(
+    `
+    SELECT data_type, character_maximum_length, is_nullable, column_default
+    FROM information_schema.columns
+    WHERE table_schema = $1::text
+      AND table_name = 'authenticators'
+      AND column_name = 'rp_id'
+  `,
+    [schema],
+  );
+  if (rows.length === 0) return false;
+  const column = rows[0];
+  if (
+    rows.length !== 1 ||
+    column?.data_type !== "character varying" ||
+    Number(column.character_maximum_length) !== 253 ||
+    column.is_nullable !== "YES" ||
+    column.column_default !== null
+  ) {
+    throw new Error(
+      `Steward schema ${schema} has an incompatible authenticators.rp_id provenance column`,
+    );
+  }
   return true;
+}
+
+async function applyPasskeyRpProvenanceMigration(
+  transaction: StewardSchemaMigrationExecutor,
+  schema: string,
+): Promise<void> {
+  if (!(await rpProvenanceColumnExists(transaction, schema))) {
+    await transaction.unsafe(
+      renderStewardSchemaMigration(getStewardPasskeyRpProvenanceMigrationSource(), schema),
+    );
+  }
+  if (!(await rpProvenanceColumnExists(transaction, schema))) {
+    throw new Error(`Steward schema ${schema} did not install authenticators.rp_id provenance`);
+  }
 }
 
 async function installStatusFunction(
@@ -266,30 +345,54 @@ async function applyInTransaction(
     FROM ${quotedSchema}.${quotedTable}
     ORDER BY migration_order
   `);
-  const expectation = getStewardSchemaMigrationExpectation();
-  if (assertAppliedMarkers(rows, expectation)) {
+  const expectations = getStewardSchemaMigrationExpectations();
+  const appliedExpectedCount = validateAppliedMarkers(rows, expectations);
+  if (rows.length >= expectations.length) {
+    if (!(await rpProvenanceColumnExists(transaction, schema))) {
+      throw new Error(
+        `Steward schema ${schema} has an RP provenance marker without authenticators.rp_id`,
+      );
+    }
     await installStatusFunction(transaction, schema);
     return { applied: [], schema };
   }
 
-  const rendered = renderStewardSchemaMigration(getStewardSchemaMigrationSource(), schema);
-  await transaction.unsafe(rendered);
-  await transaction.unsafe(
-    `INSERT INTO ${quotedSchema}.${quotedTable} (tag, hash, created_at) VALUES ($1, $2, $3)`,
-    [expectation.tag, expectation.hash, expectation.createdAt],
-  );
+  const applied: string[] = [];
+  for (let index = appliedExpectedCount; index < expectations.length; index += 1) {
+    const expectation = expectations[index];
+    if (!expectation) throw new Error(`Steward schema migration ${index} is undefined`);
+    if (expectation.tag === BOOTSTRAP_MIGRATION_TAG) {
+      await transaction.unsafe(
+        renderStewardSchemaMigration(getStewardSchemaMigrationSource(), schema),
+      );
+    } else if (expectation.tag === PASSKEY_RP_PROVENANCE_MIGRATION_TAG) {
+      await applyPasskeyRpProvenanceMigration(transaction, schema);
+    } else {
+      throw new Error(`Steward schema migration ${expectation.tag} has no installer`);
+    }
+    const inserted = await transaction.unsafe<{ migration_order: string | number }>(
+      `INSERT INTO ${quotedSchema}.${quotedTable} (tag, hash, created_at)
+       VALUES ($1, $2, $3)
+       RETURNING migration_order`,
+      [expectation.tag, expectation.hash, expectation.createdAt],
+    );
+    if (Number(inserted[0]?.migration_order) !== index + 1) {
+      throw new Error("Steward-owned migration ledger sequence is not append-only");
+    }
+    applied.push(expectation.tag);
+  }
   await installStatusFunction(transaction, schema);
-  return { applied: [expectation.tag], schema };
+  return { applied, schema };
 }
 
 /**
- * Install the #900 bootstrap function surface against the first schema in the
- * DATABASE_URL search_path. This explicit operator migration never reads or
- * writes drizzle.__drizzle_migrations; its sole provenance is the
- * schema-local __steward_release_migrations ledger. The marker covers only
- * this additive compatibility layer. A release must separately prove the
- * target schema's exact core-migration baseline before enabling it in
- * production readiness.
+ * Install the #900 bootstrap function surface and #914 passkey RP provenance
+ * against the first schema in the DATABASE_URL search_path. This explicit
+ * operator migration never reads or writes drizzle.__drizzle_migrations; its
+ * sole provenance is the schema-local __steward_release_migrations ledger.
+ * The marker covers only this additive compatibility layer. A release must
+ * separately prove the target schema's exact core-migration baseline before
+ * enabling it in production readiness.
  */
 export async function runStewardSchemaMigrations(
   options: RunStewardSchemaMigrationsOptions = {},

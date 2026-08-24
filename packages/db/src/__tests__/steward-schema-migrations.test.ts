@@ -4,7 +4,9 @@ import { PGlite } from "@electric-sql/pglite";
 import postgres from "postgres";
 
 import {
+  getStewardPasskeyRpProvenanceMigrationSource,
   getStewardSchemaMigrationExpectation,
+  getStewardSchemaMigrationExpectations,
   getStewardSchemaMigrationSource,
   renderStewardSchemaMigration,
   runStewardSchemaMigrations,
@@ -31,6 +33,17 @@ const fixtureTables = `
     is_guest boolean NOT NULL DEFAULT false,
     guest_expires_at timestamptz,
     updated_at timestamptz NOT NULL DEFAULT now()
+  );
+  CREATE TABLE authenticators (
+    id uuid PRIMARY KEY,
+    user_id uuid NOT NULL,
+    credential_id text NOT NULL UNIQUE,
+    credential_public_key text NOT NULL,
+    counter integer NOT NULL DEFAULT 0,
+    credential_device_type varchar(32),
+    credential_backed_up boolean DEFAULT false,
+    transports text[],
+    created_at timestamptz NOT NULL DEFAULT now()
   );
   CREATE TABLE user_tenants (
     user_id uuid NOT NULL,
@@ -146,7 +159,7 @@ async function assertInstalled(
   schema: string,
   sharedLedgerExpected = false,
 ): Promise<void> {
-  const expectation = getStewardSchemaMigrationExpectation();
+  const expectations = getStewardSchemaMigrationExpectations();
   const markers = await executor.unsafe<{
     migration_order: string | number;
     tag: string;
@@ -155,16 +168,21 @@ async function assertInstalled(
   }>(
     `SELECT migration_order, tag, hash, created_at FROM ${schema}.${STEWARD_SCHEMA_MIGRATIONS_TABLE}`,
   );
-  expect(markers).toEqual([
-    {
-      migration_order: expect.anything(),
+  expect(
+    markers.map((marker) => ({
+      migrationOrder: Number(marker.migration_order),
+      tag: marker.tag,
+      hash: marker.hash,
+      createdAt: Number(marker.created_at),
+    })),
+  ).toEqual(
+    expectations.map((expectation, index) => ({
+      migrationOrder: index + 1,
       tag: expectation.tag,
       hash: expectation.hash,
-      created_at: expect.anything(),
-    },
-  ]);
-  expect(Number(markers[0]?.migration_order)).toBe(1);
-  expect(Number(markers[0]?.created_at)).toBe(expectation.createdAt);
+      createdAt: expectation.createdAt,
+    })),
+  );
 
   const sharedLedger = await executor.unsafe<{ relation: string | null }>(
     "SELECT to_regclass('drizzle.__drizzle_migrations')::text AS relation",
@@ -190,8 +208,28 @@ async function assertInstalled(
     created_at: string | number;
   }>("SELECT * FROM steward_bootstrap.release_migration_manifest()");
   expect(status.map(({ tag, hash }) => ({ tag, hash }))).toEqual([
-    { tag: expectation.tag, hash: expectation.hash },
+    ...expectations.map(({ tag, hash }) => ({ tag, hash })),
   ]);
+
+  const rpProvenance = await executor.unsafe<{
+    data_type: string;
+    character_maximum_length: string | number | null;
+    is_nullable: string;
+    column_default: string | null;
+  }>(`
+    SELECT data_type, character_maximum_length, is_nullable, column_default
+    FROM information_schema.columns
+    WHERE table_schema = '${schema}'
+      AND table_name = 'authenticators'
+      AND column_name = 'rp_id'
+  `);
+  expect(rpProvenance).toHaveLength(1);
+  expect(rpProvenance[0]).toMatchObject({
+    data_type: "character varying",
+    is_nullable: "YES",
+    column_default: null,
+  });
+  expect(Number(rpProvenance[0]?.character_maximum_length)).toBe(253);
 
   const tenantSubject = await executor.unsafe<{
     tenant_id: string;
@@ -212,15 +250,38 @@ describe("Steward-owned schema compatibility migration", () => {
   test("renders the immutable #900 bootstrap surface for a configured schema", () => {
     const source = getStewardSchemaMigrationSource();
     const rendered = renderStewardSchemaMigration(source, "steward");
+    const rpProvenanceSource = getStewardPasskeyRpProvenanceMigrationSource();
+    const renderedRpProvenance = renderStewardSchemaMigration(rpProvenanceSource, "steward");
 
     expect(source).toContain("0111_tenant_rls_policy_install");
     expect(source).toContain("0112_rls_activation_release_gates");
     expect(source).toContain("0113_personal_tenant_account_lifecycle");
+    expect(rpProvenanceSource).toContain(
+      'ALTER TABLE "authenticators" ADD COLUMN "rp_id" varchar(253)',
+    );
+    expect(renderedRpProvenance).toContain(
+      'ALTER TABLE "steward"."authenticators" ADD COLUMN "rp_id" varchar(253)',
+    );
+    expect(renderedRpProvenance).not.toContain('ALTER TABLE "authenticators"');
     expect(rendered).toContain('FROM "steward".tenants');
     expect(rendered).toContain('existing "steward".users%ROWTYPE');
     expect(rendered).not.toContain("public.");
     expect(source).not.toContain("CREATE POLICY");
     expect(source).not.toContain('CREATE SCHEMA IF NOT EXISTS "steward_rls"');
+
+    const expectations = getStewardSchemaMigrationExpectations();
+    expect(expectations[0]).toEqual({
+      tag: "0000_auth_bootstrap_0111_0113",
+      hash: "5d14fb7caea8ce091d16efa1bc64afe08509da2678bbfbd0335b406c263f9344",
+      createdAt: 1_787_220_000_001,
+      count: 1,
+    });
+    expect(getStewardSchemaMigrationExpectation()).toMatchObject({
+      tag: "0001_passkey_rp_provenance_0114",
+      hash: "b14347901c5a2fba9e3b302c0a0754b061423f01733edc46c78aa2d3f9a34d38",
+      createdAt: 1_787_529_855_001,
+      count: 2,
+    });
   });
 
   for (const schema of ["public", "steward"] as const) {
@@ -234,7 +295,7 @@ describe("Steward-owned schema compatibility migration", () => {
           useAdvisoryLock: false,
         });
         expect(first).toEqual({
-          applied: [getStewardSchemaMigrationExpectation().tag],
+          applied: getStewardSchemaMigrationExpectations().map(({ tag }) => tag),
           schema,
         });
         await assertInstalled(adapter, schema);
@@ -251,6 +312,132 @@ describe("Steward-owned schema compatibility migration", () => {
     });
   }
 
+  test("appends 0114 provenance to an existing 0111-0113 marker without rewriting it", async () => {
+    const client = new PGlite("memory://");
+    const adapter = pgliteAdapter(client);
+    try {
+      await createFixture(adapter, "public");
+      await runStewardSchemaMigrations({ client: adapter, useAdvisoryLock: false });
+      const [bootstrap, rpProvenance] = getStewardSchemaMigrationExpectations();
+      if (!bootstrap || !rpProvenance) throw new Error("schema migration fixtures are incomplete");
+      await adapter.unsafe(`
+        DELETE FROM public.${STEWARD_SCHEMA_MIGRATIONS_TABLE} WHERE migration_order = 2;
+        SELECT setval(
+          pg_get_serial_sequence('public.${STEWARD_SCHEMA_MIGRATIONS_TABLE}', 'migration_order'),
+          1,
+          true
+        );
+        ALTER TABLE public.authenticators DROP COLUMN rp_id;
+      `);
+
+      await expect(
+        runStewardSchemaMigrations({ client: adapter, useAdvisoryLock: false }),
+      ).resolves.toEqual({ applied: [rpProvenance.tag], schema: "public" });
+      const markers = await adapter.unsafe<{
+        migration_order: string | number;
+        tag: string;
+        hash: string;
+        created_at: string | number;
+      }>(
+        `SELECT migration_order, tag, hash, created_at
+         FROM public.${STEWARD_SCHEMA_MIGRATIONS_TABLE}
+         ORDER BY migration_order`,
+      );
+      expect(
+        markers.map(({ migration_order, tag, hash, created_at }) => ({
+          migrationOrder: Number(migration_order),
+          tag,
+          hash,
+          createdAt: Number(created_at),
+        })),
+      ).toEqual(
+        getStewardSchemaMigrationExpectations().map(({ tag, hash, createdAt }, index) => ({
+          migrationOrder: index + 1,
+          tag,
+          hash,
+          createdAt,
+        })),
+      );
+      expect(markers[0]).toMatchObject({ tag: bootstrap.tag, hash: bootstrap.hash });
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("marks an exact current-schema 0114 column that the core migrator already installed", async () => {
+    const client = new PGlite("memory://");
+    const adapter = pgliteAdapter(client);
+    try {
+      await createFixture(adapter, "public");
+      await adapter.unsafe('ALTER TABLE public.authenticators ADD COLUMN "rp_id" varchar(253)');
+      await expect(
+        runStewardSchemaMigrations({ client: adapter, useAdvisoryLock: false }),
+      ).resolves.toEqual({
+        applied: getStewardSchemaMigrationExpectations().map(({ tag }) => tag),
+        schema: "public",
+      });
+      await assertInstalled(adapter, "public");
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("qualifies 0114 to current_schema even when public has a decoy authenticator table", async () => {
+    const client = new PGlite("memory://");
+    const adapter = pgliteAdapter(client);
+    try {
+      await adapter.unsafe("CREATE TABLE public.authenticators (id uuid PRIMARY KEY)");
+      await createFixture(adapter, "steward");
+      await runStewardSchemaMigrations({ client: adapter, useAdvisoryLock: false });
+      await assertInstalled(adapter, "steward");
+      const publicRpColumn = await adapter.unsafe<{ column_name: string }>(`
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'authenticators'
+          AND column_name = 'rp_id'
+      `);
+      expect(publicRpColumn).toEqual([]);
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("fails closed on an incompatible RP provenance column before recording markers", async () => {
+    const client = new PGlite("memory://");
+    const adapter = pgliteAdapter(client);
+    try {
+      await createFixture(adapter, "public");
+      await adapter.unsafe(
+        "ALTER TABLE public.authenticators ADD COLUMN rp_id text NOT NULL DEFAULT ''",
+      );
+      await expect(
+        runStewardSchemaMigrations({ client: adapter, useAdvisoryLock: false }),
+      ).rejects.toThrow("incompatible authenticators.rp_id provenance column");
+      const marker = await adapter.unsafe<{ relation: string | null }>(
+        `SELECT to_regclass('public.${STEWARD_SCHEMA_MIGRATIONS_TABLE}')::text AS relation`,
+      );
+      expect(marker).toEqual([{ relation: null }]);
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("fails closed when an exact 0114 marker exists without its schema postcondition", async () => {
+    const client = new PGlite("memory://");
+    const adapter = pgliteAdapter(client);
+    try {
+      await createFixture(adapter, "public");
+      await runStewardSchemaMigrations({ client: adapter, useAdvisoryLock: false });
+      await adapter.unsafe("ALTER TABLE public.authenticators DROP COLUMN rp_id");
+      await expect(
+        runStewardSchemaMigrations({ client: adapter, useAdvisoryLock: false }),
+      ).rejects.toThrow("RP provenance marker without authenticators.rp_id");
+    } finally {
+      await client.close();
+    }
+  });
+
   test("fails closed when an existing Steward-owned marker hash is not exact", async () => {
     const client = new PGlite("memory://");
     const adapter = pgliteAdapter(client);
@@ -258,11 +445,13 @@ describe("Steward-owned schema compatibility migration", () => {
       await createFixture(adapter, "public");
       await runStewardSchemaMigrations({ client: adapter, useAdvisoryLock: false });
       await adapter.unsafe(
-        `UPDATE public.${STEWARD_SCHEMA_MIGRATIONS_TABLE} SET hash = '${"0".repeat(64)}'`,
+        `UPDATE public.${STEWARD_SCHEMA_MIGRATIONS_TABLE}
+         SET hash = '${"0".repeat(64)}'
+         WHERE migration_order = 1`,
       );
       await expect(
         runStewardSchemaMigrations({ client: adapter, useAdvisoryLock: false }),
-      ).rejects.toThrow("exact expected bootstrap marker");
+      ).rejects.toThrow("exact expected release marker at order 1");
     } finally {
       await client.close();
     }
@@ -355,11 +544,14 @@ postgresDescribe("Steward-owned schema compatibility migration on real Postgres"
           VALUES ('shared-eliza-sentinel', 1793072800004);
         `);
         await createFixture(adapter, schema);
+        if (schema === "public") {
+          await client.unsafe('ALTER TABLE public.authenticators ADD COLUMN "rp_id" varchar(253)');
+        }
 
         await expect(
           runStewardSchemaMigrations({ client: adapter, useAdvisoryLock: true }),
         ).resolves.toEqual({
-          applied: [getStewardSchemaMigrationExpectation().tag],
+          applied: getStewardSchemaMigrationExpectations().map(({ tag }) => tag),
           schema,
         });
         await assertInstalled(adapter, schema, true);
