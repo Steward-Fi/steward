@@ -24,6 +24,14 @@ repository through GitHub environment secrets and variables.
   value is absent, and accepts a release only after `/health` succeeds.
 - Keep production pinned to `repository@sha256:<digest>`. Never repoint it to a
   branch or release tag.
+- A database with the audited 0082-absent/0083-present discontinuity must use
+  the separately reviewed [0082–0110 production core repair](production-core-repair-0082-0110.md)
+  before an auth-release cutover. Its Steward-owned marker never replaces the
+  exact catalog and readiness gates. That repair's old-image receipt validator
+  must also pass against the exact approved candidate digest/source and the
+  hashed evidence artifact; the pinned production image has a forward-only
+  rollback limitation after 0084 and requires provider execution to remain
+  drained.
 
 ## Promote
 

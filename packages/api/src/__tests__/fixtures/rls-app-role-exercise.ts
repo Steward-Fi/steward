@@ -91,7 +91,10 @@ try {
       .onConflictDoNothing();
     await getDb()
       .insert(userTenants)
-      .values({ userId, tenantId: personalTenantId, role: "member" })
+      // 0113 makes the personal tenant a single-owner lifecycle boundary. This
+      // real-Postgres fixture must reproduce that production shape or its later
+      // deactivation probe correctly fails the personal-membership invariant.
+      .values({ userId, tenantId: personalTenantId, role: "owner" })
       .onConflictDoNothing();
   });
   const userToken = await signAccessToken({ address: "", tenantId: personalTenantId, userId });

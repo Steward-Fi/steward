@@ -1,0 +1,44 @@
+{
+  "proofVersion": 1,
+  "databaseClass": "isolated-production-restore",
+  "productionDatabaseTouched": false,
+  "targetSchema": "steward",
+  "repairVersion": "prod-core-0082-0110-v1",
+  "catalogManifestSha256": "440545f35aed2d0470a654d1c2a0976b928c835241b282258867888b52ee820c",
+  "oldImage": {
+    "image": "ghcr.io/steward-fi/steward@sha256:51557626b6c3215d432c7f4077b1cf44a059051d5a763384335a88270b371ca1",
+    "sourceCommit": "a7b1b4d5232a234e0e3e86e600f58ef9ce8f68ad",
+    "automaticMigrationsDisabled": true
+  },
+  "candidateImage": {
+    "image": "pending",
+    "sourceCommit": "pending",
+    "automaticMigrationsDisabled": true
+  },
+  "preRepair": {
+    "health": "pending",
+    "ready": "pending",
+    "providerDiscovery": "pending",
+    "emailSession": "pending",
+    "passkeySession": "pending",
+    "sessionRefresh": "pending",
+    "chatWrite": "pending"
+  },
+  "postRepair": {
+    "health": "pending",
+    "ready": "pending",
+    "providerDiscovery": "pending",
+    "emailSession": "pending",
+    "passkeySession": "pending",
+    "sessionRefresh": "pending",
+    "chatWrite": "pending"
+  },
+  "providerExecution": {
+    "drainedBeforeRepair": false,
+    "legacyResume": "pending",
+    "candidateEvidenceResumeAndExecution": "pending",
+    "rollbackMode": "pending"
+  },
+  "reviewedBy": "",
+  "evidenceArtifactSha256": "pending"
+}

@@ -1,0 +1,3591 @@
+{
+  "manifestVersion": 1,
+  "repairVersion": "prod-core-0082-0110-v1",
+  "sourceHead": "53399910ab9288297981e1b5679b293ec732e414",
+  "schemas": {
+    "public": {
+      "serverVersionNum": "180006",
+      "existing0083": {
+        "keyCount": 47,
+        "keys": [
+          {
+            "kind": "column",
+            "objectName": "approval_queue.quorum_approvals_count"
+          },
+          {
+            "kind": "column",
+            "objectName": "approval_queue.quorum_eligible_user_ids"
+          },
+          {
+            "kind": "column",
+            "objectName": "approval_queue.quorum_threshold"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_approvals.action_digest"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_approvals.approval_commitment_hash"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_approvals.approval_queue_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_approvals.approver_user_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_approvals.binding_revision_at_decision"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_approvals.created_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_approvals.decision"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_approvals.decision_idempotency_key_hash"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_approvals.decision_request_hash"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_approvals.id"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_approvals.intent_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_approvals.mfa_age_ms_at_decision"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_approvals.mfa_verified_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_approvals.reason"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_approvals.reason_code"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_approvals.request_hash"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_approvals.tenant_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_approvals.workspace_id"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "approval_queue.approval_queue_quorum_approvals_count_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "approval_queue.approval_queue_quorum_eligible_user_ids_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "approval_queue.approval_queue_quorum_shape_chk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_approvals.provider_action_approvals_action_dige"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_approvals.provider_action_approvals_approval_co"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_approvals.provider_action_approvals_approval_qu"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_approvals.provider_action_approvals_approver_us"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_approvals.provider_action_approvals_binding_rev"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_approvals.provider_action_approvals_created_at_"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_approvals.provider_action_approvals_decision_ch"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_approvals.provider_action_approvals_decision_id"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_approvals.provider_action_approvals_decision_no"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_approvals.provider_action_approvals_decision_re"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_approvals.provider_action_approvals_id_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_approvals.provider_action_approvals_intent_id_n"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_approvals.provider_action_approvals_pkey"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_approvals.provider_action_approvals_queue_fk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_approvals.provider_action_approvals_request_has"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_approvals.provider_action_approvals_tenant_id_n"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_approvals.provider_action_approvals_workspace_i"
+          },
+          {
+            "kind": "index",
+            "objectName": "provider_action_approvals.provider_action_approvals_approver_un"
+          },
+          {
+            "kind": "index",
+            "objectName": "provider_action_approvals.provider_action_approvals_idem_uniq"
+          },
+          {
+            "kind": "index",
+            "objectName": "provider_action_approvals.provider_action_approvals_intent_idx"
+          },
+          {
+            "kind": "index",
+            "objectName": "provider_action_approvals.provider_action_approvals_pkey"
+          },
+          {
+            "kind": "index",
+            "objectName": "provider_action_approvals.provider_action_approvals_queue_idx"
+          },
+          {
+            "kind": "relation",
+            "objectName": "provider_action_approvals"
+          }
+        ],
+        "beforeHash": "89f3d3d0c64fb982ad4e798468afdfd4f484fa232fd919b12e078456e837e995",
+        "afterHash": "5825061f06ab2f0a144a4253bc8c1e90d99ecd085885aa413f27ab8da9bb2cbe",
+        "deltaHash": "9e3fd58e0e0072289dfaf8c4c63b1724011b825850b664ce6c0b6434a006e703"
+      },
+      "changes0082": {
+        "keyCount": 47,
+        "beforeHash": "b97bd85ebb84276ea663d5c12f290ef3899c99aee838ea7880f624b04c768ae2",
+        "afterHash": "254427814e9a207954c38305719b73ea1c5a5b582ac375404b072f5aa88c4c0b",
+        "deltaHash": "87c49b9e215c9347e6e96d08ce51641b42dc1f10d056a5d86a481df01d646d9f"
+      },
+      "changes0084To0110": {
+        "keyCount": 347,
+        "beforeHash": "0387bd45a1934c9424d86a8cf4398ac11889c1b1698d884fc66782a2701fa661",
+        "afterHash": "e2d60ef1af4d349a00b16ae48198f8181bc49c681629d66d99f1c001434c7cd2",
+        "deltaHash": "8cdae0ef2b1d1c0e215356d19541447d9bd104e592e6a85e738309939cef4e41",
+        "semanticFinalCounts": {
+          "column": 152,
+          "constraint": 70,
+          "enum": 1,
+          "function": 14,
+          "index": 39,
+          "relation": 11,
+          "trigger": 14
+        }
+      },
+      "changes": {
+        "keyCount": 391,
+        "keys": [
+          {
+            "kind": "column",
+            "objectName": "audit_archive_chunks.archive_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archive_chunks.byte_length"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archive_chunks.chunk_index"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archive_chunks.created_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archive_chunks.event_count"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archive_chunks.from_seq"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archive_chunks.jsonl"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archive_chunks.sha256"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archive_chunks.to_seq"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archives.created_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archives.durability_ack"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archives.durability_ack_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archives.durability_ack_key_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archives.durability_ack_sha256"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archives.durability_ack_signature"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archives.event_count"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archives.from_seq"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archives.id"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archives.manifest"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archives.manifest_sha256"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archives.pruned_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archives.public_key"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archives.retention_policy_revision"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archives.sealed_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archives.signature"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archives.signing_key_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archives.source"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archives.status"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archives.tenant_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archives.to_seq"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archives.updated_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_checkpoints.anchor_proof"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_checkpoints.anchor_verified_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_retention_policies.archive_chunk_size"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_retention_policies.created_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_retention_policies.enabled"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_retention_policies.retention_days"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_retention_policies.revision"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_retention_policies.tenant_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_retention_policies.updated_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_retention_policies.updated_by"
+          },
+          {
+            "kind": "column",
+            "objectName": "evm_wallet_nonce_inflight.tenant_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "evm_wallet_nonce_owners.chain_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "evm_wallet_nonce_owners.claimed_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "evm_wallet_nonce_owners.tenant_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "evm_wallet_nonce_owners.wallet_address"
+          },
+          {
+            "kind": "column",
+            "objectName": "evm_wallet_nonces.tenant_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "execution_authorization_nonces.action_digest"
+          },
+          {
+            "kind": "column",
+            "objectName": "execution_authorization_nonces.backend_identity_digest"
+          },
+          {
+            "kind": "column",
+            "objectName": "execution_authorization_nonces.commitment_hash"
+          },
+          {
+            "kind": "column",
+            "objectName": "execution_authorization_nonces.dispatch_state"
+          },
+          {
+            "kind": "column",
+            "objectName": "execution_authorization_nonces.dispatched_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "execution_authorization_nonces.execution_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "execution_authorization_nonces.grant_dependency_hash"
+          },
+          {
+            "kind": "column",
+            "objectName": "execution_authorization_nonces.intent_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "execution_authorization_nonces.key_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "execution_authorization_nonces.operation_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "execution_authorization_nonces.operation_revision"
+          },
+          {
+            "kind": "column",
+            "objectName": "execution_authorization_nonces.outcome_recorded_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "execution_authorization_nonces.provider_account_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "execution_authorization_nonces.provider_idempotency_key"
+          },
+          {
+            "kind": "column",
+            "objectName": "execution_authorization_nonces.request_hash"
+          },
+          {
+            "kind": "column",
+            "objectName": "execution_authorization_nonces.route_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "execution_authorization_nonces.route_revision"
+          },
+          {
+            "kind": "column",
+            "objectName": "execution_authorization_nonces.secret_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "execution_authorization_nonces.secret_version"
+          },
+          {
+            "kind": "column",
+            "objectName": "execution_authorization_nonces.version"
+          },
+          {
+            "kind": "column",
+            "objectName": "execution_authorization_nonces.workspace_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "operator_transfer_reservations.agent_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "operator_transfer_reservations.amount_base_units"
+          },
+          {
+            "kind": "column",
+            "objectName": "operator_transfer_reservations.created_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "operator_transfer_reservations.destination"
+          },
+          {
+            "kind": "column",
+            "objectName": "operator_transfer_reservations.finalized_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "operator_transfer_reservations.id"
+          },
+          {
+            "kind": "column",
+            "objectName": "operator_transfer_reservations.idempotency_key"
+          },
+          {
+            "kind": "column",
+            "objectName": "operator_transfer_reservations.rail"
+          },
+          {
+            "kind": "column",
+            "objectName": "operator_transfer_reservations.status"
+          },
+          {
+            "kind": "column",
+            "objectName": "operator_transfer_reservations.tenant_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_bindings.execution_policy_decision"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_bindings.execution_policy_decision_hash"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_bindings.execution_policy_decision_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_bindings.execution_policy_evaluated_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_bindings.execution_policy_revision_hash"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_reservation_generations.attempts"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_reservation_generations.claimed_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_reservation_generations.claimed_by"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_reservation_generations.created_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_reservation_generations.generation"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_reservation_generations.handles"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_reservation_generations.id"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_reservation_generations.intent_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_reservation_generations.last_error"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_reservation_generations.next_retry_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_reservation_generations.phase"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_reservation_generations.reconciled_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_reservation_generations.state"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_reservation_generations.tenant_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_agent_budgets.agent_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_agent_budgets.auto_freeze"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_agent_budgets.created_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_agent_budgets.currency"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_agent_budgets.dimension"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_agent_budgets.enabled"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_agent_budgets.id"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_agent_budgets.max"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_agent_budgets.revision"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_agent_budgets.tenant_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_agent_budgets.updated_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_agent_budgets.window_seconds"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_agent_budgets.workspace_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_google_credential_lifecycles.attempts"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_google_credential_lifecycles.created_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_google_credential_lifecycles.credential_secret_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_google_credential_lifecycles.expected_account_revision"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_google_credential_lifecycles.id"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_google_credential_lifecycles.kind"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_google_credential_lifecycles.last_error_code"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_google_credential_lifecycles.provider_account_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_google_credential_lifecycles.state"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_google_credential_lifecycles.tenant_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_google_credential_lifecycles.updated_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_google_credential_lifecycles.workspace_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_x_credential_lifecycles.attempts"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_x_credential_lifecycles.created_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_x_credential_lifecycles.credential_secret_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_x_credential_lifecycles.disabled_routes"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_x_credential_lifecycles.expected_account_revision"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_x_credential_lifecycles.id"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_x_credential_lifecycles.kind"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_x_credential_lifecycles.last_error_code"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_x_credential_lifecycles.next_retry_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_x_credential_lifecycles.provider_account_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_x_credential_lifecycles.state"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_x_credential_lifecycles.tenant_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_x_credential_lifecycles.updated_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_x_credential_lifecycles.workspace_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "secret_routes.authority_mode"
+          },
+          {
+            "kind": "column",
+            "objectName": "secret_routes.injection_config"
+          },
+          {
+            "kind": "column",
+            "objectName": "secret_routes.injection_strategy"
+          },
+          {
+            "kind": "column",
+            "objectName": "secret_routes.provider_operation_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "transactions.execution_backend"
+          },
+          {
+            "kind": "column",
+            "objectName": "transactions.execution_backend_identity_digest"
+          },
+          {
+            "kind": "column",
+            "objectName": "transactions.receipt_polled_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_lease_events.action"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_lease_events.created_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_lease_events.decision"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_lease_events.id"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_lease_events.lease_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_lease_events.metadata"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_lease_events.tenant_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.agent_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.authority_checked_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.authority_digest"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.capability_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.created_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.delivered_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.expires_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.grant_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.id"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.idempotency_key_hash"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.issuer"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.last_error"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.resource"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.resource_hash"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.revoked_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.status"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.tenant_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.token_auth_tag"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.token_ciphertext"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.token_hash"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.token_iv"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.token_salt"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.updated_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.workspace_id"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archive_chunks.audit_archive_chunks_archive_fk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archive_chunks.audit_archive_chunks_archive_id_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archive_chunks.audit_archive_chunks_byte_length_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archive_chunks.audit_archive_chunks_bytes_valid"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archive_chunks.audit_archive_chunks_chunk_index_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archive_chunks.audit_archive_chunks_count_valid"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archive_chunks.audit_archive_chunks_created_at_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archive_chunks.audit_archive_chunks_event_count_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archive_chunks.audit_archive_chunks_from_seq_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archive_chunks.audit_archive_chunks_jsonl_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archive_chunks.audit_archive_chunks_pk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archive_chunks.audit_archive_chunks_range_valid"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archive_chunks.audit_archive_chunks_sha256_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archive_chunks.audit_archive_chunks_to_seq_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archives.audit_archives_count_valid"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archives.audit_archives_created_at_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archives.audit_archives_durability_ack_complete"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archives.audit_archives_event_count_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archives.audit_archives_from_seq_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archives.audit_archives_id_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archives.audit_archives_manifest_transport_bound"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archives.audit_archives_pkey"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archives.audit_archives_policy_revision_valid"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archives.audit_archives_range_valid"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archives.audit_archives_sealed_fields_valid"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archives.audit_archives_source_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archives.audit_archives_source_valid"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archives.audit_archives_status_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archives.audit_archives_status_valid"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archives.audit_archives_tenant_fk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archives.audit_archives_tenant_id_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archives.audit_archives_to_seq_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archives.audit_archives_updated_at_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_checkpoints.audit_checkpoints_anchor_complete"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_retention_policies.audit_retention_chunk_bounds"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_retention_policies.audit_retention_days_bounds"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_retention_policies.audit_retention_policies_archive_chunk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_retention_policies.audit_retention_policies_created_at_no"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_retention_policies.audit_retention_policies_enabled_not_n"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_retention_policies.audit_retention_policies_pkey"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_retention_policies.audit_retention_policies_retention_day"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_retention_policies.audit_retention_policies_revision_not_"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_retention_policies.audit_retention_policies_tenant_fk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_retention_policies.audit_retention_policies_tenant_id_not"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_retention_policies.audit_retention_policies_updated_at_no"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_retention_policies.audit_retention_revision_positive"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "evm_wallet_nonce_inflight.evm_wallet_nonce_inflight_owner_fk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "evm_wallet_nonce_inflight.evm_wallet_nonce_inflight_tenant_id_n"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "evm_wallet_nonce_owners.evm_wallet_nonce_owners_address_chk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "evm_wallet_nonce_owners.evm_wallet_nonce_owners_chain_id_not_nu"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "evm_wallet_nonce_owners.evm_wallet_nonce_owners_claimed_at_not_"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "evm_wallet_nonce_owners.evm_wallet_nonce_owners_pkey"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "evm_wallet_nonce_owners.evm_wallet_nonce_owners_tenant_id_fkey"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "evm_wallet_nonce_owners.evm_wallet_nonce_owners_tenant_id_not_n"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "evm_wallet_nonce_owners.evm_wallet_nonce_owners_wallet_address_"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "evm_wallet_nonces.evm_wallet_nonces_owner_fk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "evm_wallet_nonces.evm_wallet_nonces_tenant_id_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "execution_authorization_nonces.exec_auth_nonces_dispatch_shape_"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "execution_authorization_nonces.exec_auth_nonces_dispatch_state_"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "execution_authorization_nonces.exec_auth_nonces_intent_fk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "execution_authorization_nonces.exec_auth_nonces_operation_fk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "execution_authorization_nonces.exec_auth_nonces_route_fk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "execution_authorization_nonces.exec_auth_nonces_secret_fk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "execution_authorization_nonces.exec_auth_nonces_v2_arm_chk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "execution_authorization_nonces.exec_auth_nonces_version_chk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "execution_authorization_nonces.execution_auth_external_identity"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "execution_authorization_nonces.execution_authorization_nonces_d"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "execution_authorization_nonces.execution_authorization_nonces_v"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "operator_transfer_reservations.operator_transfer_reservation_am"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "operator_transfer_reservations.operator_transfer_reservation_ra"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "operator_transfer_reservations.operator_transfer_reservation_st"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "operator_transfer_reservations.operator_transfer_reservations_a"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "operator_transfer_reservations.operator_transfer_reservations_c"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "operator_transfer_reservations.operator_transfer_reservations_d"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "operator_transfer_reservations.operator_transfer_reservations_i"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "operator_transfer_reservations.operator_transfer_reservations_p"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "operator_transfer_reservations.operator_transfer_reservations_r"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "operator_transfer_reservations.operator_transfer_reservations_s"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "operator_transfer_reservations.operator_transfer_reservations_t"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_bindings.provider_action_bindings_actor_fk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_bindings.provider_action_bindings_approval_shap"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_bindings.provider_action_bindings_execution_pol"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_bindings.provider_action_bindings_profile_chk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_bindings.provider_action_bindings_state_chk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_bindings.provider_action_bindings_status_chk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_reservation_generations.provider_action_reserva"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_agent_budgets.provider_agent_budgets_agent_fk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_agent_budgets.provider_agent_budgets_agent_id_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_agent_budgets.provider_agent_budgets_auto_freeze_not_n"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_agent_budgets.provider_agent_budgets_created_at_not_nu"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_agent_budgets.provider_agent_budgets_dimension_not_nul"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_agent_budgets.provider_agent_budgets_enabled_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_agent_budgets.provider_agent_budgets_id_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_agent_budgets.provider_agent_budgets_max_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_agent_budgets.provider_agent_budgets_pkey"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_agent_budgets.provider_agent_budgets_revision_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_agent_budgets.provider_agent_budgets_shape_chk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_agent_budgets.provider_agent_budgets_tenant_id_not_nul"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_agent_budgets.provider_agent_budgets_updated_at_not_nu"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_agent_budgets.provider_agent_budgets_window_seconds_no"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_agent_budgets.provider_agent_budgets_workspace_fk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_google_credential_lifecycles.provider_google_credentia"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_google_credential_lifecycles.provider_google_lifecycle"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_x_credential_lifecycles.provider_x_credential_lifecycl"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_x_credential_lifecycles.provider_x_lifecycle_account_f"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_x_credential_lifecycles.provider_x_lifecycle_disabled_"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_x_credential_lifecycles.provider_x_lifecycle_kind_chec"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_x_credential_lifecycles.provider_x_lifecycle_refresh_b"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_x_credential_lifecycles.provider_x_lifecycle_retry_che"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_x_credential_lifecycles.provider_x_lifecycle_revision_"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_x_credential_lifecycles.provider_x_lifecycle_secret_fk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_x_credential_lifecycles.provider_x_lifecycle_secret_st"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_x_credential_lifecycles.provider_x_lifecycle_state_che"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_x_credential_lifecycles.provider_x_lifecycle_workspace"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "secret_routes.secret_routes_authority_mode_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "secret_routes.secret_routes_governed_operation_chk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "secret_routes.secret_routes_injection_config_chk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "secret_routes.secret_routes_injection_config_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "secret_routes.secret_routes_injection_strategy_chk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "secret_routes.secret_routes_injection_strategy_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "secret_routes.secret_routes_provider_operation_fk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "transactions.transactions_external_identity_chk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "upstream_credential_lease_events.upstream_credential_lease_even"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_agent_id_"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_authority"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_capabilit"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_created_a"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_grant_id_"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_id_not_nu"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_idempoten"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_issuer_no"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_pkey"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_resource_"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_status_ch"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_status_no"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_tenant_id"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_updated_a"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_workspace"
+          },
+          {
+            "kind": "enum",
+            "objectName": "secret_route_authority_mode.governed_v2"
+          },
+          {
+            "kind": "enum",
+            "objectName": "secret_route_authority_mode.legacy"
+          },
+          {
+            "kind": "enum",
+            "objectName": "transaction_status.outcome_unknown"
+          },
+          {
+            "kind": "function",
+            "objectName": "steward_bump_provider_agent_budget_revision()"
+          },
+          {
+            "kind": "function",
+            "objectName": "steward_bump_secret_route_authority_revision()"
+          },
+          {
+            "kind": "function",
+            "objectName": "steward_fence_agent_authority_creation()"
+          },
+          {
+            "kind": "function",
+            "objectName": "steward_fence_provider_action_agent()"
+          },
+          {
+            "kind": "function",
+            "objectName": "steward_fence_provider_action_intent_tenant()"
+          },
+          {
+            "kind": "function",
+            "objectName": "steward_fence_upstream_lease_workspace()"
+          },
+          {
+            "kind": "function",
+            "objectName": "steward_guard_agent_delete()"
+          },
+          {
+            "kind": "function",
+            "objectName": "steward_guard_audit_archive_immutability()"
+          },
+          {
+            "kind": "function",
+            "objectName": "steward_guard_audit_checkpoint_immutability()"
+          },
+          {
+            "kind": "function",
+            "objectName": "steward_guard_workspace_delete()"
+          },
+          {
+            "kind": "function",
+            "objectName": "steward_lock_tenant_deletion(target_tenant text)"
+          },
+          {
+            "kind": "function",
+            "objectName": "steward_provider_action_binding_guard()"
+          },
+          {
+            "kind": "function",
+            "objectName": "steward_provider_reservation_generation_guard()"
+          },
+          {
+            "kind": "function",
+            "objectName": "steward_reject_upstream_lease_evidence_mutation()"
+          },
+          {
+            "kind": "index",
+            "objectName": "approval_queue.approval_queue_agent_status_requested_idx"
+          },
+          {
+            "kind": "index",
+            "objectName": "audit_archive_chunks.audit_archive_chunks_pk"
+          },
+          {
+            "kind": "index",
+            "objectName": "audit_archives.audit_archives_native_authority_unique"
+          },
+          {
+            "kind": "index",
+            "objectName": "audit_archives.audit_archives_pkey"
+          },
+          {
+            "kind": "index",
+            "objectName": "audit_archives.audit_archives_resumable_idx"
+          },
+          {
+            "kind": "index",
+            "objectName": "audit_archives.audit_archives_tenant_created_idx"
+          },
+          {
+            "kind": "index",
+            "objectName": "audit_retention_policies.audit_retention_policies_pkey"
+          },
+          {
+            "kind": "index",
+            "objectName": "evm_wallet_nonce_inflight.evm_wallet_nonce_inflight_key_idx"
+          },
+          {
+            "kind": "index",
+            "objectName": "evm_wallet_nonce_inflight.evm_wallet_nonce_inflight_reclaim_idx"
+          },
+          {
+            "kind": "index",
+            "objectName": "evm_wallet_nonce_owners.evm_wallet_nonce_owners_pkey"
+          },
+          {
+            "kind": "index",
+            "objectName": "evm_wallet_nonce_owners.evm_wallet_nonce_owners_tenant_key_idx"
+          },
+          {
+            "kind": "index",
+            "objectName": "evm_wallet_nonces.evm_wallet_nonces_wallet_chain_idx"
+          },
+          {
+            "kind": "index",
+            "objectName": "execution_authorization_nonces.exec_auth_nonces_execution_uniq"
+          },
+          {
+            "kind": "index",
+            "objectName": "execution_authorization_nonces.exec_auth_nonces_intent_uniq"
+          },
+          {
+            "kind": "index",
+            "objectName": "execution_authorization_nonces.exec_auth_nonces_provider_idem_u"
+          },
+          {
+            "kind": "index",
+            "objectName": "operator_transfer_reservations.operator_transfer_reservation_ag"
+          },
+          {
+            "kind": "index",
+            "objectName": "operator_transfer_reservations.operator_transfer_reservation_re"
+          },
+          {
+            "kind": "index",
+            "objectName": "operator_transfer_reservations.operator_transfer_reservations_p"
+          },
+          {
+            "kind": "index",
+            "objectName": "provider_action_reservation_generations.provider_action_reserva"
+          },
+          {
+            "kind": "index",
+            "objectName": "provider_agent_budgets.provider_agent_budgets_identity_idx"
+          },
+          {
+            "kind": "index",
+            "objectName": "provider_agent_budgets.provider_agent_budgets_lookup_idx"
+          },
+          {
+            "kind": "index",
+            "objectName": "provider_agent_budgets.provider_agent_budgets_pkey"
+          },
+          {
+            "kind": "index",
+            "objectName": "provider_google_credential_lifecycles.provider_google_credentia"
+          },
+          {
+            "kind": "index",
+            "objectName": "provider_google_credential_lifecycles.provider_google_lifecycle"
+          },
+          {
+            "kind": "index",
+            "objectName": "provider_operations.provider_operations_tenant_id_id_uniq"
+          },
+          {
+            "kind": "index",
+            "objectName": "provider_x_credential_lifecycles.provider_x_credential_lifecycl"
+          },
+          {
+            "kind": "index",
+            "objectName": "provider_x_credential_lifecycles.provider_x_lifecycle_account_s"
+          },
+          {
+            "kind": "index",
+            "objectName": "provider_x_credential_lifecycles.provider_x_lifecycle_active_re"
+          },
+          {
+            "kind": "index",
+            "objectName": "provider_x_credential_lifecycles.provider_x_lifecycle_recovery_"
+          },
+          {
+            "kind": "index",
+            "objectName": "upstream_credential_lease_events.upstream_credential_lease_even"
+          },
+          {
+            "kind": "index",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_binding_i"
+          },
+          {
+            "kind": "index",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_pkey"
+          },
+          {
+            "kind": "index",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_replay_un"
+          },
+          {
+            "kind": "index",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_status_au"
+          },
+          {
+            "kind": "index",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_status_ex"
+          },
+          {
+            "kind": "index",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_status_up"
+          },
+          {
+            "kind": "index",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_tenant_id"
+          },
+          {
+            "kind": "relation",
+            "objectName": "audit_archive_chunks"
+          },
+          {
+            "kind": "relation",
+            "objectName": "audit_archives"
+          },
+          {
+            "kind": "relation",
+            "objectName": "audit_retention_policies"
+          },
+          {
+            "kind": "relation",
+            "objectName": "evm_wallet_nonce_owners"
+          },
+          {
+            "kind": "relation",
+            "objectName": "operator_transfer_reservations"
+          },
+          {
+            "kind": "relation",
+            "objectName": "provider_action_reservation_generations"
+          },
+          {
+            "kind": "relation",
+            "objectName": "provider_agent_budgets"
+          },
+          {
+            "kind": "relation",
+            "objectName": "provider_google_credential_lifecycles"
+          },
+          {
+            "kind": "relation",
+            "objectName": "provider_x_credential_lifecycles"
+          },
+          {
+            "kind": "relation",
+            "objectName": "upstream_credential_lease_events"
+          },
+          {
+            "kind": "relation",
+            "objectName": "upstream_credential_leases"
+          },
+          {
+            "kind": "trigger",
+            "objectName": "agents.agents_delete_authority_guard"
+          },
+          {
+            "kind": "trigger",
+            "objectName": "audit_archives.audit_archives_immutability_guard"
+          },
+          {
+            "kind": "trigger",
+            "objectName": "audit_checkpoints.audit_checkpoints_immutability_guard"
+          },
+          {
+            "kind": "trigger",
+            "objectName": "intents.provider_action_intents_tenant_fence"
+          },
+          {
+            "kind": "trigger",
+            "objectName": "pending_proxy_requests.pending_proxy_requests_agent_fence"
+          },
+          {
+            "kind": "trigger",
+            "objectName": "provider_action_bindings.provider_action_bindings_agent_fence"
+          },
+          {
+            "kind": "trigger",
+            "objectName": "provider_action_reservation_generations.provider_action_reserva"
+          },
+          {
+            "kind": "trigger",
+            "objectName": "provider_agent_budgets.provider_agent_budgets_bump_revision"
+          },
+          {
+            "kind": "trigger",
+            "objectName": "secret_routes.secret_routes_agent_fence"
+          },
+          {
+            "kind": "trigger",
+            "objectName": "upstream_credential_lease_events.upstream_credential_lease_even"
+          },
+          {
+            "kind": "trigger",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_agent_fen"
+          },
+          {
+            "kind": "trigger",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_no_delete"
+          },
+          {
+            "kind": "trigger",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_workspace"
+          },
+          {
+            "kind": "trigger",
+            "objectName": "workspaces.workspaces_delete_authority_guard"
+          }
+        ],
+        "beforeHash": "135a7ff58f69a3763aa99146325b102b3c53ab13d70ca793c50bb71feee76ee5",
+        "afterHash": "0490c681edd3c2b9617bbc56790dcb2f9980a7dd9149b4b13cea6c02e9bfa185",
+        "deltaHash": "f3c13ee3bc4e3df269e8b97f04e10dbd5ab0466c491639d331d6dd86bc1e77cf"
+      }
+    },
+    "steward": {
+      "serverVersionNum": "180006",
+      "existing0083": {
+        "keyCount": 47,
+        "keys": [
+          {
+            "kind": "column",
+            "objectName": "approval_queue.quorum_approvals_count"
+          },
+          {
+            "kind": "column",
+            "objectName": "approval_queue.quorum_eligible_user_ids"
+          },
+          {
+            "kind": "column",
+            "objectName": "approval_queue.quorum_threshold"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_approvals.action_digest"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_approvals.approval_commitment_hash"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_approvals.approval_queue_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_approvals.approver_user_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_approvals.binding_revision_at_decision"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_approvals.created_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_approvals.decision"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_approvals.decision_idempotency_key_hash"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_approvals.decision_request_hash"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_approvals.id"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_approvals.intent_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_approvals.mfa_age_ms_at_decision"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_approvals.mfa_verified_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_approvals.reason"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_approvals.reason_code"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_approvals.request_hash"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_approvals.tenant_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_approvals.workspace_id"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "approval_queue.approval_queue_quorum_approvals_count_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "approval_queue.approval_queue_quorum_eligible_user_ids_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "approval_queue.approval_queue_quorum_shape_chk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_approvals.provider_action_approvals_action_dige"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_approvals.provider_action_approvals_approval_co"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_approvals.provider_action_approvals_approval_qu"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_approvals.provider_action_approvals_approver_us"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_approvals.provider_action_approvals_binding_rev"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_approvals.provider_action_approvals_created_at_"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_approvals.provider_action_approvals_decision_ch"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_approvals.provider_action_approvals_decision_id"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_approvals.provider_action_approvals_decision_no"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_approvals.provider_action_approvals_decision_re"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_approvals.provider_action_approvals_id_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_approvals.provider_action_approvals_intent_id_n"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_approvals.provider_action_approvals_pkey"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_approvals.provider_action_approvals_queue_fk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_approvals.provider_action_approvals_request_has"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_approvals.provider_action_approvals_tenant_id_n"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_approvals.provider_action_approvals_workspace_i"
+          },
+          {
+            "kind": "index",
+            "objectName": "provider_action_approvals.provider_action_approvals_approver_un"
+          },
+          {
+            "kind": "index",
+            "objectName": "provider_action_approvals.provider_action_approvals_idem_uniq"
+          },
+          {
+            "kind": "index",
+            "objectName": "provider_action_approvals.provider_action_approvals_intent_idx"
+          },
+          {
+            "kind": "index",
+            "objectName": "provider_action_approvals.provider_action_approvals_pkey"
+          },
+          {
+            "kind": "index",
+            "objectName": "provider_action_approvals.provider_action_approvals_queue_idx"
+          },
+          {
+            "kind": "relation",
+            "objectName": "provider_action_approvals"
+          }
+        ],
+        "beforeHash": "89f3d3d0c64fb982ad4e798468afdfd4f484fa232fd919b12e078456e837e995",
+        "afterHash": "5825061f06ab2f0a144a4253bc8c1e90d99ecd085885aa413f27ab8da9bb2cbe",
+        "deltaHash": "9e3fd58e0e0072289dfaf8c4c63b1724011b825850b664ce6c0b6434a006e703"
+      },
+      "changes0082": {
+        "keyCount": 47,
+        "beforeHash": "5e15e9f28bbf255a3d838b79c8ff88c0beb3ee3ecc1789145fff5ce76f9fc01e",
+        "afterHash": "44f3941e9301f70cafbea65fba1a566e4169429f7da4685e972b767369a4d04a",
+        "deltaHash": "19ee56358cd987faf7ee3bbbb8ecae60cb71c14503a098c473d88ab9ee432fcb"
+      },
+      "changes0084To0110": {
+        "keyCount": 347,
+        "beforeHash": "72524af7c14159b295cff184197df932cd127767cfab46c264ffc0085128a887",
+        "afterHash": "dd9f95b25d278019fc8d60d41a1521c7986adfef2f38663ad05bdc0ce384bd95",
+        "deltaHash": "ca1dc342db7d9ac1e4a36fb07bfdab5c8b968dc1bb99e5293ca462944677148a",
+        "semanticFinalCounts": {
+          "column": 152,
+          "constraint": 70,
+          "enum": 1,
+          "function": 14,
+          "index": 39,
+          "relation": 11,
+          "trigger": 14
+        }
+      },
+      "changes": {
+        "keyCount": 391,
+        "keys": [
+          {
+            "kind": "column",
+            "objectName": "audit_archive_chunks.archive_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archive_chunks.byte_length"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archive_chunks.chunk_index"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archive_chunks.created_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archive_chunks.event_count"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archive_chunks.from_seq"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archive_chunks.jsonl"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archive_chunks.sha256"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archive_chunks.to_seq"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archives.created_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archives.durability_ack"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archives.durability_ack_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archives.durability_ack_key_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archives.durability_ack_sha256"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archives.durability_ack_signature"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archives.event_count"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archives.from_seq"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archives.id"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archives.manifest"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archives.manifest_sha256"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archives.pruned_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archives.public_key"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archives.retention_policy_revision"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archives.sealed_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archives.signature"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archives.signing_key_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archives.source"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archives.status"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archives.tenant_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archives.to_seq"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_archives.updated_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_checkpoints.anchor_proof"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_checkpoints.anchor_verified_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_retention_policies.archive_chunk_size"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_retention_policies.created_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_retention_policies.enabled"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_retention_policies.retention_days"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_retention_policies.revision"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_retention_policies.tenant_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_retention_policies.updated_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "audit_retention_policies.updated_by"
+          },
+          {
+            "kind": "column",
+            "objectName": "evm_wallet_nonce_inflight.tenant_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "evm_wallet_nonce_owners.chain_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "evm_wallet_nonce_owners.claimed_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "evm_wallet_nonce_owners.tenant_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "evm_wallet_nonce_owners.wallet_address"
+          },
+          {
+            "kind": "column",
+            "objectName": "evm_wallet_nonces.tenant_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "execution_authorization_nonces.action_digest"
+          },
+          {
+            "kind": "column",
+            "objectName": "execution_authorization_nonces.backend_identity_digest"
+          },
+          {
+            "kind": "column",
+            "objectName": "execution_authorization_nonces.commitment_hash"
+          },
+          {
+            "kind": "column",
+            "objectName": "execution_authorization_nonces.dispatch_state"
+          },
+          {
+            "kind": "column",
+            "objectName": "execution_authorization_nonces.dispatched_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "execution_authorization_nonces.execution_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "execution_authorization_nonces.grant_dependency_hash"
+          },
+          {
+            "kind": "column",
+            "objectName": "execution_authorization_nonces.intent_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "execution_authorization_nonces.key_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "execution_authorization_nonces.operation_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "execution_authorization_nonces.operation_revision"
+          },
+          {
+            "kind": "column",
+            "objectName": "execution_authorization_nonces.outcome_recorded_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "execution_authorization_nonces.provider_account_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "execution_authorization_nonces.provider_idempotency_key"
+          },
+          {
+            "kind": "column",
+            "objectName": "execution_authorization_nonces.request_hash"
+          },
+          {
+            "kind": "column",
+            "objectName": "execution_authorization_nonces.route_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "execution_authorization_nonces.route_revision"
+          },
+          {
+            "kind": "column",
+            "objectName": "execution_authorization_nonces.secret_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "execution_authorization_nonces.secret_version"
+          },
+          {
+            "kind": "column",
+            "objectName": "execution_authorization_nonces.version"
+          },
+          {
+            "kind": "column",
+            "objectName": "execution_authorization_nonces.workspace_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "operator_transfer_reservations.agent_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "operator_transfer_reservations.amount_base_units"
+          },
+          {
+            "kind": "column",
+            "objectName": "operator_transfer_reservations.created_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "operator_transfer_reservations.destination"
+          },
+          {
+            "kind": "column",
+            "objectName": "operator_transfer_reservations.finalized_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "operator_transfer_reservations.id"
+          },
+          {
+            "kind": "column",
+            "objectName": "operator_transfer_reservations.idempotency_key"
+          },
+          {
+            "kind": "column",
+            "objectName": "operator_transfer_reservations.rail"
+          },
+          {
+            "kind": "column",
+            "objectName": "operator_transfer_reservations.status"
+          },
+          {
+            "kind": "column",
+            "objectName": "operator_transfer_reservations.tenant_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_bindings.execution_policy_decision"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_bindings.execution_policy_decision_hash"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_bindings.execution_policy_decision_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_bindings.execution_policy_evaluated_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_bindings.execution_policy_revision_hash"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_reservation_generations.attempts"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_reservation_generations.claimed_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_reservation_generations.claimed_by"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_reservation_generations.created_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_reservation_generations.generation"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_reservation_generations.handles"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_reservation_generations.id"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_reservation_generations.intent_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_reservation_generations.last_error"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_reservation_generations.next_retry_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_reservation_generations.phase"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_reservation_generations.reconciled_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_reservation_generations.state"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_action_reservation_generations.tenant_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_agent_budgets.agent_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_agent_budgets.auto_freeze"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_agent_budgets.created_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_agent_budgets.currency"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_agent_budgets.dimension"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_agent_budgets.enabled"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_agent_budgets.id"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_agent_budgets.max"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_agent_budgets.revision"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_agent_budgets.tenant_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_agent_budgets.updated_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_agent_budgets.window_seconds"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_agent_budgets.workspace_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_google_credential_lifecycles.attempts"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_google_credential_lifecycles.created_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_google_credential_lifecycles.credential_secret_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_google_credential_lifecycles.expected_account_revision"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_google_credential_lifecycles.id"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_google_credential_lifecycles.kind"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_google_credential_lifecycles.last_error_code"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_google_credential_lifecycles.provider_account_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_google_credential_lifecycles.state"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_google_credential_lifecycles.tenant_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_google_credential_lifecycles.updated_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_google_credential_lifecycles.workspace_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_x_credential_lifecycles.attempts"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_x_credential_lifecycles.created_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_x_credential_lifecycles.credential_secret_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_x_credential_lifecycles.disabled_routes"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_x_credential_lifecycles.expected_account_revision"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_x_credential_lifecycles.id"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_x_credential_lifecycles.kind"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_x_credential_lifecycles.last_error_code"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_x_credential_lifecycles.next_retry_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_x_credential_lifecycles.provider_account_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_x_credential_lifecycles.state"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_x_credential_lifecycles.tenant_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_x_credential_lifecycles.updated_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "provider_x_credential_lifecycles.workspace_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "secret_routes.authority_mode"
+          },
+          {
+            "kind": "column",
+            "objectName": "secret_routes.injection_config"
+          },
+          {
+            "kind": "column",
+            "objectName": "secret_routes.injection_strategy"
+          },
+          {
+            "kind": "column",
+            "objectName": "secret_routes.provider_operation_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "transactions.execution_backend"
+          },
+          {
+            "kind": "column",
+            "objectName": "transactions.execution_backend_identity_digest"
+          },
+          {
+            "kind": "column",
+            "objectName": "transactions.receipt_polled_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_lease_events.action"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_lease_events.created_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_lease_events.decision"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_lease_events.id"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_lease_events.lease_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_lease_events.metadata"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_lease_events.tenant_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.agent_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.authority_checked_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.authority_digest"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.capability_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.created_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.delivered_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.expires_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.grant_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.id"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.idempotency_key_hash"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.issuer"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.last_error"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.resource"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.resource_hash"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.revoked_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.status"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.tenant_id"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.token_auth_tag"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.token_ciphertext"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.token_hash"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.token_iv"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.token_salt"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.updated_at"
+          },
+          {
+            "kind": "column",
+            "objectName": "upstream_credential_leases.workspace_id"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archive_chunks.audit_archive_chunks_archive_fk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archive_chunks.audit_archive_chunks_archive_id_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archive_chunks.audit_archive_chunks_byte_length_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archive_chunks.audit_archive_chunks_bytes_valid"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archive_chunks.audit_archive_chunks_chunk_index_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archive_chunks.audit_archive_chunks_count_valid"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archive_chunks.audit_archive_chunks_created_at_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archive_chunks.audit_archive_chunks_event_count_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archive_chunks.audit_archive_chunks_from_seq_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archive_chunks.audit_archive_chunks_jsonl_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archive_chunks.audit_archive_chunks_pk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archive_chunks.audit_archive_chunks_range_valid"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archive_chunks.audit_archive_chunks_sha256_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archive_chunks.audit_archive_chunks_to_seq_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archives.audit_archives_count_valid"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archives.audit_archives_created_at_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archives.audit_archives_durability_ack_complete"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archives.audit_archives_event_count_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archives.audit_archives_from_seq_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archives.audit_archives_id_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archives.audit_archives_manifest_transport_bound"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archives.audit_archives_pkey"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archives.audit_archives_policy_revision_valid"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archives.audit_archives_range_valid"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archives.audit_archives_sealed_fields_valid"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archives.audit_archives_source_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archives.audit_archives_source_valid"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archives.audit_archives_status_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archives.audit_archives_status_valid"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archives.audit_archives_tenant_fk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archives.audit_archives_tenant_id_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archives.audit_archives_to_seq_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_archives.audit_archives_updated_at_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_checkpoints.audit_checkpoints_anchor_complete"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_retention_policies.audit_retention_chunk_bounds"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_retention_policies.audit_retention_days_bounds"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_retention_policies.audit_retention_policies_archive_chunk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_retention_policies.audit_retention_policies_created_at_no"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_retention_policies.audit_retention_policies_enabled_not_n"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_retention_policies.audit_retention_policies_pkey"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_retention_policies.audit_retention_policies_retention_day"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_retention_policies.audit_retention_policies_revision_not_"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_retention_policies.audit_retention_policies_tenant_fk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_retention_policies.audit_retention_policies_tenant_id_not"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_retention_policies.audit_retention_policies_updated_at_no"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "audit_retention_policies.audit_retention_revision_positive"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "evm_wallet_nonce_inflight.evm_wallet_nonce_inflight_owner_fk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "evm_wallet_nonce_inflight.evm_wallet_nonce_inflight_tenant_id_n"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "evm_wallet_nonce_owners.evm_wallet_nonce_owners_address_chk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "evm_wallet_nonce_owners.evm_wallet_nonce_owners_chain_id_not_nu"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "evm_wallet_nonce_owners.evm_wallet_nonce_owners_claimed_at_not_"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "evm_wallet_nonce_owners.evm_wallet_nonce_owners_pkey"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "evm_wallet_nonce_owners.evm_wallet_nonce_owners_tenant_id_fkey"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "evm_wallet_nonce_owners.evm_wallet_nonce_owners_tenant_id_not_n"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "evm_wallet_nonce_owners.evm_wallet_nonce_owners_wallet_address_"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "evm_wallet_nonces.evm_wallet_nonces_owner_fk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "evm_wallet_nonces.evm_wallet_nonces_tenant_id_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "execution_authorization_nonces.exec_auth_nonces_dispatch_shape_"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "execution_authorization_nonces.exec_auth_nonces_dispatch_state_"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "execution_authorization_nonces.exec_auth_nonces_intent_fk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "execution_authorization_nonces.exec_auth_nonces_operation_fk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "execution_authorization_nonces.exec_auth_nonces_route_fk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "execution_authorization_nonces.exec_auth_nonces_secret_fk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "execution_authorization_nonces.exec_auth_nonces_v2_arm_chk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "execution_authorization_nonces.exec_auth_nonces_version_chk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "execution_authorization_nonces.execution_auth_external_identity"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "execution_authorization_nonces.execution_authorization_nonces_d"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "execution_authorization_nonces.execution_authorization_nonces_v"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "operator_transfer_reservations.operator_transfer_reservation_am"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "operator_transfer_reservations.operator_transfer_reservation_ra"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "operator_transfer_reservations.operator_transfer_reservation_st"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "operator_transfer_reservations.operator_transfer_reservations_a"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "operator_transfer_reservations.operator_transfer_reservations_c"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "operator_transfer_reservations.operator_transfer_reservations_d"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "operator_transfer_reservations.operator_transfer_reservations_i"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "operator_transfer_reservations.operator_transfer_reservations_p"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "operator_transfer_reservations.operator_transfer_reservations_r"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "operator_transfer_reservations.operator_transfer_reservations_s"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "operator_transfer_reservations.operator_transfer_reservations_t"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_bindings.provider_action_bindings_actor_fk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_bindings.provider_action_bindings_approval_shap"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_bindings.provider_action_bindings_execution_pol"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_bindings.provider_action_bindings_profile_chk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_bindings.provider_action_bindings_state_chk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_bindings.provider_action_bindings_status_chk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_action_reservation_generations.provider_action_reserva"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_agent_budgets.provider_agent_budgets_agent_fk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_agent_budgets.provider_agent_budgets_agent_id_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_agent_budgets.provider_agent_budgets_auto_freeze_not_n"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_agent_budgets.provider_agent_budgets_created_at_not_nu"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_agent_budgets.provider_agent_budgets_dimension_not_nul"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_agent_budgets.provider_agent_budgets_enabled_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_agent_budgets.provider_agent_budgets_id_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_agent_budgets.provider_agent_budgets_max_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_agent_budgets.provider_agent_budgets_pkey"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_agent_budgets.provider_agent_budgets_revision_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_agent_budgets.provider_agent_budgets_shape_chk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_agent_budgets.provider_agent_budgets_tenant_id_not_nul"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_agent_budgets.provider_agent_budgets_updated_at_not_nu"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_agent_budgets.provider_agent_budgets_window_seconds_no"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_agent_budgets.provider_agent_budgets_workspace_fk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_google_credential_lifecycles.provider_google_credentia"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_google_credential_lifecycles.provider_google_lifecycle"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_x_credential_lifecycles.provider_x_credential_lifecycl"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_x_credential_lifecycles.provider_x_lifecycle_account_f"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_x_credential_lifecycles.provider_x_lifecycle_disabled_"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_x_credential_lifecycles.provider_x_lifecycle_kind_chec"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_x_credential_lifecycles.provider_x_lifecycle_refresh_b"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_x_credential_lifecycles.provider_x_lifecycle_retry_che"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_x_credential_lifecycles.provider_x_lifecycle_revision_"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_x_credential_lifecycles.provider_x_lifecycle_secret_fk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_x_credential_lifecycles.provider_x_lifecycle_secret_st"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_x_credential_lifecycles.provider_x_lifecycle_state_che"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "provider_x_credential_lifecycles.provider_x_lifecycle_workspace"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "secret_routes.secret_routes_authority_mode_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "secret_routes.secret_routes_governed_operation_chk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "secret_routes.secret_routes_injection_config_chk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "secret_routes.secret_routes_injection_config_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "secret_routes.secret_routes_injection_strategy_chk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "secret_routes.secret_routes_injection_strategy_not_null"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "secret_routes.secret_routes_provider_operation_fk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "transactions.transactions_external_identity_chk"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "upstream_credential_lease_events.upstream_credential_lease_even"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_agent_id_"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_authority"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_capabilit"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_created_a"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_grant_id_"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_id_not_nu"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_idempoten"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_issuer_no"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_pkey"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_resource_"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_status_ch"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_status_no"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_tenant_id"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_updated_a"
+          },
+          {
+            "kind": "constraint",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_workspace"
+          },
+          {
+            "kind": "enum",
+            "objectName": "secret_route_authority_mode.governed_v2"
+          },
+          {
+            "kind": "enum",
+            "objectName": "secret_route_authority_mode.legacy"
+          },
+          {
+            "kind": "enum",
+            "objectName": "transaction_status.outcome_unknown"
+          },
+          {
+            "kind": "function",
+            "objectName": "steward_bump_provider_agent_budget_revision()"
+          },
+          {
+            "kind": "function",
+            "objectName": "steward_bump_secret_route_authority_revision()"
+          },
+          {
+            "kind": "function",
+            "objectName": "steward_fence_agent_authority_creation()"
+          },
+          {
+            "kind": "function",
+            "objectName": "steward_fence_provider_action_agent()"
+          },
+          {
+            "kind": "function",
+            "objectName": "steward_fence_provider_action_intent_tenant()"
+          },
+          {
+            "kind": "function",
+            "objectName": "steward_fence_upstream_lease_workspace()"
+          },
+          {
+            "kind": "function",
+            "objectName": "steward_guard_agent_delete()"
+          },
+          {
+            "kind": "function",
+            "objectName": "steward_guard_audit_archive_immutability()"
+          },
+          {
+            "kind": "function",
+            "objectName": "steward_guard_audit_checkpoint_immutability()"
+          },
+          {
+            "kind": "function",
+            "objectName": "steward_guard_workspace_delete()"
+          },
+          {
+            "kind": "function",
+            "objectName": "steward_lock_tenant_deletion(target_tenant text)"
+          },
+          {
+            "kind": "function",
+            "objectName": "steward_provider_action_binding_guard()"
+          },
+          {
+            "kind": "function",
+            "objectName": "steward_provider_reservation_generation_guard()"
+          },
+          {
+            "kind": "function",
+            "objectName": "steward_reject_upstream_lease_evidence_mutation()"
+          },
+          {
+            "kind": "index",
+            "objectName": "approval_queue.approval_queue_agent_status_requested_idx"
+          },
+          {
+            "kind": "index",
+            "objectName": "audit_archive_chunks.audit_archive_chunks_pk"
+          },
+          {
+            "kind": "index",
+            "objectName": "audit_archives.audit_archives_native_authority_unique"
+          },
+          {
+            "kind": "index",
+            "objectName": "audit_archives.audit_archives_pkey"
+          },
+          {
+            "kind": "index",
+            "objectName": "audit_archives.audit_archives_resumable_idx"
+          },
+          {
+            "kind": "index",
+            "objectName": "audit_archives.audit_archives_tenant_created_idx"
+          },
+          {
+            "kind": "index",
+            "objectName": "audit_retention_policies.audit_retention_policies_pkey"
+          },
+          {
+            "kind": "index",
+            "objectName": "evm_wallet_nonce_inflight.evm_wallet_nonce_inflight_key_idx"
+          },
+          {
+            "kind": "index",
+            "objectName": "evm_wallet_nonce_inflight.evm_wallet_nonce_inflight_reclaim_idx"
+          },
+          {
+            "kind": "index",
+            "objectName": "evm_wallet_nonce_owners.evm_wallet_nonce_owners_pkey"
+          },
+          {
+            "kind": "index",
+            "objectName": "evm_wallet_nonce_owners.evm_wallet_nonce_owners_tenant_key_idx"
+          },
+          {
+            "kind": "index",
+            "objectName": "evm_wallet_nonces.evm_wallet_nonces_wallet_chain_idx"
+          },
+          {
+            "kind": "index",
+            "objectName": "execution_authorization_nonces.exec_auth_nonces_execution_uniq"
+          },
+          {
+            "kind": "index",
+            "objectName": "execution_authorization_nonces.exec_auth_nonces_intent_uniq"
+          },
+          {
+            "kind": "index",
+            "objectName": "execution_authorization_nonces.exec_auth_nonces_provider_idem_u"
+          },
+          {
+            "kind": "index",
+            "objectName": "operator_transfer_reservations.operator_transfer_reservation_ag"
+          },
+          {
+            "kind": "index",
+            "objectName": "operator_transfer_reservations.operator_transfer_reservation_re"
+          },
+          {
+            "kind": "index",
+            "objectName": "operator_transfer_reservations.operator_transfer_reservations_p"
+          },
+          {
+            "kind": "index",
+            "objectName": "provider_action_reservation_generations.provider_action_reserva"
+          },
+          {
+            "kind": "index",
+            "objectName": "provider_agent_budgets.provider_agent_budgets_identity_idx"
+          },
+          {
+            "kind": "index",
+            "objectName": "provider_agent_budgets.provider_agent_budgets_lookup_idx"
+          },
+          {
+            "kind": "index",
+            "objectName": "provider_agent_budgets.provider_agent_budgets_pkey"
+          },
+          {
+            "kind": "index",
+            "objectName": "provider_google_credential_lifecycles.provider_google_credentia"
+          },
+          {
+            "kind": "index",
+            "objectName": "provider_google_credential_lifecycles.provider_google_lifecycle"
+          },
+          {
+            "kind": "index",
+            "objectName": "provider_operations.provider_operations_tenant_id_id_uniq"
+          },
+          {
+            "kind": "index",
+            "objectName": "provider_x_credential_lifecycles.provider_x_credential_lifecycl"
+          },
+          {
+            "kind": "index",
+            "objectName": "provider_x_credential_lifecycles.provider_x_lifecycle_account_s"
+          },
+          {
+            "kind": "index",
+            "objectName": "provider_x_credential_lifecycles.provider_x_lifecycle_active_re"
+          },
+          {
+            "kind": "index",
+            "objectName": "provider_x_credential_lifecycles.provider_x_lifecycle_recovery_"
+          },
+          {
+            "kind": "index",
+            "objectName": "upstream_credential_lease_events.upstream_credential_lease_even"
+          },
+          {
+            "kind": "index",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_binding_i"
+          },
+          {
+            "kind": "index",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_pkey"
+          },
+          {
+            "kind": "index",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_replay_un"
+          },
+          {
+            "kind": "index",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_status_au"
+          },
+          {
+            "kind": "index",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_status_ex"
+          },
+          {
+            "kind": "index",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_status_up"
+          },
+          {
+            "kind": "index",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_tenant_id"
+          },
+          {
+            "kind": "relation",
+            "objectName": "audit_archive_chunks"
+          },
+          {
+            "kind": "relation",
+            "objectName": "audit_archives"
+          },
+          {
+            "kind": "relation",
+            "objectName": "audit_retention_policies"
+          },
+          {
+            "kind": "relation",
+            "objectName": "evm_wallet_nonce_owners"
+          },
+          {
+            "kind": "relation",
+            "objectName": "operator_transfer_reservations"
+          },
+          {
+            "kind": "relation",
+            "objectName": "provider_action_reservation_generations"
+          },
+          {
+            "kind": "relation",
+            "objectName": "provider_agent_budgets"
+          },
+          {
+            "kind": "relation",
+            "objectName": "provider_google_credential_lifecycles"
+          },
+          {
+            "kind": "relation",
+            "objectName": "provider_x_credential_lifecycles"
+          },
+          {
+            "kind": "relation",
+            "objectName": "upstream_credential_lease_events"
+          },
+          {
+            "kind": "relation",
+            "objectName": "upstream_credential_leases"
+          },
+          {
+            "kind": "trigger",
+            "objectName": "agents.agents_delete_authority_guard"
+          },
+          {
+            "kind": "trigger",
+            "objectName": "audit_archives.audit_archives_immutability_guard"
+          },
+          {
+            "kind": "trigger",
+            "objectName": "audit_checkpoints.audit_checkpoints_immutability_guard"
+          },
+          {
+            "kind": "trigger",
+            "objectName": "intents.provider_action_intents_tenant_fence"
+          },
+          {
+            "kind": "trigger",
+            "objectName": "pending_proxy_requests.pending_proxy_requests_agent_fence"
+          },
+          {
+            "kind": "trigger",
+            "objectName": "provider_action_bindings.provider_action_bindings_agent_fence"
+          },
+          {
+            "kind": "trigger",
+            "objectName": "provider_action_reservation_generations.provider_action_reserva"
+          },
+          {
+            "kind": "trigger",
+            "objectName": "provider_agent_budgets.provider_agent_budgets_bump_revision"
+          },
+          {
+            "kind": "trigger",
+            "objectName": "secret_routes.secret_routes_agent_fence"
+          },
+          {
+            "kind": "trigger",
+            "objectName": "upstream_credential_lease_events.upstream_credential_lease_even"
+          },
+          {
+            "kind": "trigger",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_agent_fen"
+          },
+          {
+            "kind": "trigger",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_no_delete"
+          },
+          {
+            "kind": "trigger",
+            "objectName": "upstream_credential_leases.upstream_credential_leases_workspace"
+          },
+          {
+            "kind": "trigger",
+            "objectName": "workspaces.workspaces_delete_authority_guard"
+          }
+        ],
+        "beforeHash": "035498eccc09214ddae1c244a2a8ac9e6da42432578dea28d0b13a3147cc177f",
+        "afterHash": "967aa5d1b2d483eee7044285091e55120df1a30881ec29df332b08f86e88832a",
+        "deltaHash": "5190cf00d789e8ef252197d5c946ffac1b4b31ea626ad4bc10a4bbf476402919"
+      }
+    }
+  }
+}
