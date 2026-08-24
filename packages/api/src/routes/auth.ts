@@ -11,8 +11,8 @@
  * GET  /providers                   — available auth methods (passkey/email/siwe/google/discord)
  * POST /logout                      — client-side logout (no-op server side)
  *
- * POST /passkey/register/options    — { email } → WebAuthn creation options
- * POST /passkey/register/verify     — { email, response } → { token, user }
+ * POST /passkey/register/options    — { email, emailGrant? } → WebAuthn creation options
+ * POST /passkey/register/verify     — { email, response, emailGrant? } → { token, user }
  * POST /passkey/login/options       — { email } → WebAuthn request options
  * POST /passkey/login/verify        — { email, response } → { token, user }
  *
@@ -1519,6 +1519,22 @@ async function peekEmailGrant(grant: string, email: string, tenantId: string): P
   } catch {
     return false;
   }
+}
+
+/**
+ * Test-only seam for exercising verified-email enrollment routes without
+ * sending or scraping an OTP. Production grants are still issued exclusively
+ * by /email/otp/verify.
+ */
+export async function _seedEmailGrantForTests(
+  grant: string,
+  email: string,
+  tenantId: string,
+): Promise<void> {
+  await getEmailGrantStore().set(
+    emailGrantKey(grant),
+    JSON.stringify({ email: email.toLowerCase().trim(), tenantId }),
+  );
 }
 
 const OAUTH_CODE_REDEEM_LOCK_TTL_MS = 10 * 1000;
@@ -7637,26 +7653,31 @@ auth.post("/mfa/passkey/options", async (c) => {
   );
   if (methodResponse) return methodResponse;
 
+  const passkeyAuth = getPasskeyAuth(c.req.header("origin"));
   const passkeys = await getDb()
     .select({
       credentialId: authenticators.credentialId,
+      rpId: authenticators.rpId,
       transports: authenticators.transports,
     })
     .from(authenticators)
     .where(eq(authenticators.userId, session.payload.userId));
-  if (passkeys.length === 0) {
+  // Explicitly cross-RP credentials cannot satisfy this RP's WebAuthn
+  // challenge. Legacy NULL provenance stays eligible so the browser can
+  // adjudicate it, and a successful assertion will safely backfill the RP.
+  const eligiblePasskeys = passkeys.filter(
+    (credential) => credential.rpId === null || credential.rpId === passkeyAuth.rpID,
+  );
+  if (eligiblePasskeys.length === 0) {
     return c.json<ApiResponse>({ ok: false, error: "No passkey is registered for this user" }, 404);
   }
 
-  const options = await getPasskeyAuth(c.req.header("origin")).generateAuthenticationOptions(
-    `mfa:${session.payload.userId}`,
-    {
-      allowCredentials: passkeys.map((credential) => ({
-        id: credential.credentialId,
-        transports: (credential.transports ?? []) as never[],
-      })),
-    },
-  );
+  const options = await passkeyAuth.generateAuthenticationOptions(`mfa:${session.payload.userId}`, {
+    allowCredentials: eligiblePasskeys.map((credential) => ({
+      id: credential.credentialId,
+      transports: (credential.transports ?? []) as never[],
+    })),
+  });
   const challengeId = options.challenge;
   await getChallengeStore().set(
     passkeyMfaChallengeKey(session.payload.userId, challengeId),
@@ -7712,6 +7733,11 @@ const completePasskeyMfaHandler = async (c: Context) => {
     return c.json<ApiResponse>({ ok: false, error: "Passkey MFA verification failed" }, 401);
   }
 
+  const passkeyAuth = getPasskeyAuth(c.req.header("origin"));
+  if (cred.rpId !== null && cred.rpId !== passkeyAuth.rpID) {
+    return c.json<ApiResponse>({ ok: false, error: "Passkey MFA verification failed" }, 401);
+  }
+
   let verification: Awaited<ReturnType<PasskeyAuth["verifyAuthentication"]>>;
   try {
     const challengeKey = passkeyMfaChallengeKey(session.payload.userId, body.challengeId);
@@ -7719,7 +7745,7 @@ const completePasskeyMfaHandler = async (c: Context) => {
     if (!expectedChallenge) {
       return c.json<ApiResponse>({ ok: false, error: "Invalid or expired passkey challenge" }, 401);
     }
-    verification = await getPasskeyAuth(c.req.header("origin")).verifyAuthentication(
+    verification = await passkeyAuth.verifyAuthentication(
       body.response as unknown as Parameters<PasskeyAuth["verifyAuthentication"]>[0],
       expectedChallenge,
       cred.credentialPublicKey,
@@ -7752,7 +7778,11 @@ const completePasskeyMfaHandler = async (c: Context) => {
 
   const updatedMfaCounters = await getDb()
     .update(authenticators)
-    .set({ counter: verification.authenticationInfo.newCounter })
+    .set({
+      counter: verification.authenticationInfo.newCounter,
+      // A verified assertion proves a legacy credential's RP provenance.
+      ...(cred.rpId === null ? { rpId: passkeyAuth.rpID } : {}),
+    })
     .where(and(eq(authenticators.id, cred.id), eq(authenticators.counter, cred.counter)))
     .returning({ id: authenticators.id });
   if (updatedMfaCounters.length !== 1) {
@@ -8234,8 +8264,9 @@ auth.delete("/sessions", async (c) => {
 
 /**
  * POST /passkey/register/options
- * Body: { email }
- * Finds or creates user, returns WebAuthn registration options.
+ * Body: { email, emailGrant? }
+ * Verified-email enrollment returns 409 when the account already has a
+ * passkey for this RP, while authenticated sessions can add devices.
  */
 auth.post("/passkey/register/options", async (c) => {
   // Pre-auth reachable via the email-grant path — rate limit like the other
@@ -8258,6 +8289,9 @@ auth.post("/passkey/register/options", async (c) => {
   }
   const email = body.email.toLowerCase().trim();
   const db = getDb();
+  const emailGrant =
+    typeof body.emailGrant === "string" && body.emailGrant.length > 0 ? body.emailGrant : null;
+  const usingEmailGrant = emailGrant !== null;
 
   // Two ways in: an authenticated session (add-passkey for logged-in users)
   // or a verified-email grant from /email/otp/verify (Privy-style signup:
@@ -8267,14 +8301,14 @@ auth.post("/passkey/register/options", async (c) => {
   let userEmail: string | null;
   let ssoTenantId: string;
 
-  if (typeof body.emailGrant === "string" && body.emailGrant.length > 0) {
+  if (emailGrant !== null) {
     const resolvedTenantId =
       c.req.header("X-Steward-Tenant")?.trim() || body.tenantId?.trim() || defaultAuthTenantId();
     const methodResponse = await requireTenantLoginMethodAllowed(c, resolvedTenantId, "passkey");
     if (methodResponse) return methodResponse;
     // Peek (not consume): the grant is only burned at register/verify so a
     // cancelled Touch ID prompt doesn't cost the user their verification.
-    const grantOk = await peekEmailGrant(body.emailGrant, email, resolvedTenantId);
+    const grantOk = await peekEmailGrant(emailGrant, email, resolvedTenantId);
     if (!grantOk) {
       return c.json<ApiResponse>({ ok: false, error: "Invalid or expired email grant" }, 401);
     }
@@ -8326,20 +8360,44 @@ auth.post("/passkey/register/options", async (c) => {
   );
   if (ssoRequiredResponse) return ssoRequiredResponse;
 
+  const passkeyAuth = getPasskeyAuth(c.req.header("origin"));
   const existingCreds = await db
-    .select({ credentialId: authenticators.credentialId })
+    .select({
+      credentialId: authenticators.credentialId,
+      rpId: authenticators.rpId,
+    })
     .from(authenticators)
     .where(eq(authenticators.userId, userId));
+
+  // The verified-email path exists to establish the account's first passkey.
+  // Only provenance that explicitly matches the current RP can trigger the
+  // recovery signal. A cross-RP credential must not block registration here,
+  // and a legacy NULL row is ambiguous: keep it in excludeCredentials so the
+  // browser can safely adjudicate whether it belongs to this RP.
+  if (usingEmailGrant && existingCreds.some((cred) => cred.rpId === passkeyAuth.rpID)) {
+    return c.json<ApiResponse & { code: "passkey_already_registered" }>(
+      {
+        ok: false,
+        error: "A passkey already exists for this email. Sign in with it instead.",
+        code: "passkey_already_registered",
+      },
+      409,
+    );
+  }
+
+  const sameOrLegacyCreds = existingCreds.filter(
+    (cred) => cred.rpId === null || cred.rpId === passkeyAuth.rpID,
+  );
 
   const attachment =
     body.authenticatorAttachment === "platform" || body.authenticatorAttachment === "cross-platform"
       ? body.authenticatorAttachment
       : undefined;
 
-  const options = await getPasskeyAuth(c.req.header("origin")).generateRegistrationOptions(
+  const options = await passkeyAuth.generateRegistrationOptions(
     userId,
     userEmail ?? email,
-    existingCreds.map((cred) => cred.credentialId),
+    sameOrLegacyCreds.map((cred) => cred.credentialId),
     attachment ? { authenticatorAttachment: attachment } : undefined,
   );
 
@@ -8440,9 +8498,10 @@ auth.post("/passkey/register/verify", async (c) => {
   const ssoRequiredResponse = await requireNonSsoEmailLoginAllowed(c, tenantId, email, "Passkey");
   if (ssoRequiredResponse) return ssoRequiredResponse;
 
+  const passkeyAuth = getPasskeyAuth(c.req.header("origin"));
   let verification: Awaited<ReturnType<PasskeyAuth["verifyRegistration"]>>;
   try {
-    verification = await getPasskeyAuth(c.req.header("origin")).verifyRegistration(
+    verification = await passkeyAuth.verifyRegistration(
       user.id,
       body.response as unknown as Parameters<PasskeyAuth["verifyRegistration"]>[1],
     );
@@ -8482,6 +8541,7 @@ auth.post("/passkey/register/verify", async (c) => {
       userId: user.id,
       credentialId: credential.id,
       credentialPublicKey: uint8ArrayToBase64url(credential.publicKey),
+      rpId: passkeyAuth.rpID,
       counter: credential.counter,
       credentialDeviceType,
       credentialBackedUp,
@@ -8634,6 +8694,11 @@ auth.post("/passkey/login/verify", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Passkey authentication failed" }, 401);
   }
 
+  const passkeyAuth = getPasskeyAuth(c.req.header("origin"));
+  if (cred.rpId !== null && cred.rpId !== passkeyAuth.rpID) {
+    return c.json<ApiResponse>({ ok: false, error: "Passkey authentication failed" }, 401);
+  }
+
   let verification: Awaited<ReturnType<PasskeyAuth["verifyAuthentication"]>>;
   try {
     const expectedChallenge = await getChallengeStore().consume(
@@ -8642,7 +8707,7 @@ auth.post("/passkey/login/verify", async (c) => {
     if (!expectedChallenge) {
       return c.json<ApiResponse>({ ok: false, error: "Passkey authentication failed" }, 401);
     }
-    verification = await getPasskeyAuth(c.req.header("origin")).verifyAuthentication(
+    verification = await passkeyAuth.verifyAuthentication(
       body.response as unknown as Parameters<PasskeyAuth["verifyAuthentication"]>[0],
       expectedChallenge,
       cred.credentialPublicKey,
@@ -8677,7 +8742,11 @@ auth.post("/passkey/login/verify", async (c) => {
   // Update counter to prevent replay attacks
   const updatedCounters = await db
     .update(authenticators)
-    .set({ counter: verification.authenticationInfo.newCounter })
+    .set({
+      counter: verification.authenticationInfo.newCounter,
+      // A verified assertion proves a legacy credential's RP provenance.
+      ...(cred.rpId === null ? { rpId: passkeyAuth.rpID } : {}),
+    })
     .where(and(eq(authenticators.id, cred.id), eq(authenticators.counter, cred.counter)))
     .returning({ id: authenticators.id });
   if (updatedCounters.length !== 1) {
