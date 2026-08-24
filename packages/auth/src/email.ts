@@ -550,6 +550,10 @@ export class EmailAuth {
       if (!isValidDeliveryReceipt(receipt)) {
         throw new Error("email provider returned no acceptance receipt");
       }
+      console.info("[steward:auth] email provider accepted send", {
+        provider: receipt.provider,
+        messageId: receipt.id ?? null,
+      });
     } catch (err) {
       console.error("[steward:auth] email provider rejected send", redactedThrownDiagnostics(err));
       throw new EmailDeliveryError();
