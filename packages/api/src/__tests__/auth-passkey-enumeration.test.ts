@@ -128,21 +128,26 @@ describe("passkey login options privacy", () => {
     expect(options.allowCredentials).toEqual([]);
   }
 
-  it("returns the same non-enumerating shape for known and unknown emails", async () => {
-    const [knownResponse, unknownResponse] = await Promise.all([
+  it("returns the same non-enumerating shape for known, no-passkey, and unknown emails", async () => {
+    const [knownResponse, noPasskeyResponse, unknownResponse] = await Promise.all([
       requestOptions(`  ${KNOWN_EMAIL.toUpperCase()}  `),
+      requestOptions(NO_PASSKEY_EMAIL),
       requestOptions(UNKNOWN_EMAIL),
     ]);
     expect(knownResponse.status).toBe(200);
+    expect(noPasskeyResponse.status).toBe(200);
     expect(unknownResponse.status).toBe(200);
 
     const known = (await knownResponse.json()) as LoginOptions;
+    const noPasskey = (await noPasskeyResponse.json()) as LoginOptions;
     const unknown = (await unknownResponse.json()) as LoginOptions;
     assertDiscoverableCredentialShape(known);
+    assertDiscoverableCredentialShape(noPasskey);
     assertDiscoverableCredentialShape(unknown);
+    expect(Object.keys(known).sort()).toEqual(Object.keys(noPasskey).sort());
     expect(Object.keys(known).sort()).toEqual(Object.keys(unknown).sort());
 
-    for (const payload of [known, unknown]) {
+    for (const payload of [known, noPasskey, unknown]) {
       const serialized = JSON.stringify(payload);
       expect(serialized).not.toContain(KNOWN_CREDENTIAL_ID);
       expect(serialized).not.toContain(SECOND_KNOWN_CREDENTIAL_ID);
@@ -155,6 +160,11 @@ describe("passkey login options privacy", () => {
     expect(
       await getAuthChallengeStore().get(`passkey-login:${KNOWN_EMAIL}:${known.challengeId}`),
     ).toBe(known.challenge);
+    expect(
+      await getAuthChallengeStore().get(
+        `passkey-login:${NO_PASSKEY_EMAIL}:${noPasskey.challengeId}`,
+      ),
+    ).toBe(noPasskey.challenge);
     expect(
       await getAuthChallengeStore().get(`passkey-login:${UNKNOWN_EMAIL}:${unknown.challengeId}`),
     ).toBe(unknown.challenge);

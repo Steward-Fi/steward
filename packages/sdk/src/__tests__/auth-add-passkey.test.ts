@@ -267,6 +267,35 @@ describe("StewardAuth.addPasskey", () => {
     });
   });
 
+  it("never treats an unrelated tenant-hint 404 as an account-state registration signal", async () => {
+    global.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      const body = init?.body ? JSON.parse(init.body as string) : undefined;
+      captured.push({ url, body });
+      return new Response(JSON.stringify({ ok: false, error: "tenant not found" }), {
+        status: 404,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const auth = new StewardAuth({
+      baseUrl: "https://api.example.test",
+      tenantId: "missing-tenant-hint",
+    });
+    await expect(auth.signInWithPasskey("shadow@shad0w.xyz")).rejects.toMatchObject({
+      status: 404,
+    });
+
+    expect(captured).toEqual([
+      {
+        url: "https://api.example.test/auth/passkey/login/options",
+        body: { email: "shadow@shad0w.xyz", tenantId: "missing-tenant-hint" },
+      },
+    ]);
+    expect(startAuthentication).not.toHaveBeenCalled();
+    expect(startRegistration).not.toHaveBeenCalled();
+  });
+
   it("completes passkey MFA with bearer auth and stores the refreshed session", async () => {
     const storage = memoryStorage();
     const initialToken = fakeJwt();
