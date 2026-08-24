@@ -47,6 +47,10 @@ import {
   resolveClientIp,
   SOCKET_PEER_ENV_KEY,
 } from "./services/runtime-gate";
+import {
+  createStewardReleaseReadinessProbe,
+  resolveStewardMigrationReadinessConfig,
+} from "./services/steward-release-readiness";
 import { startTransactionReceiptPollingScheduler } from "./services/transaction-receipt-poller";
 import {
   getUpstreamCredentialLeaseSchedulerHealth,
@@ -61,6 +65,13 @@ const PORT = parseInt(process.env.PORT || "3200", 10);
 const startTime = Date.now();
 const migrationExpectation = getMigrationExpectation();
 const migrationLedgerExpectation = getMigrationLedgerExpectation();
+const migrationReadinessConfig = resolveStewardMigrationReadinessConfig();
+const stewardReleaseReadinessProbe =
+  migrationReadinessConfig.mode === "steward-owned"
+    ? createStewardReleaseReadinessProbe({
+        expectedSchema: migrationReadinessConfig.expectedSchema,
+      })
+    : undefined;
 let migrationsRan = false;
 
 if (!Number.isInteger(PORT) || PORT <= 0) {
@@ -152,7 +163,20 @@ app.get("/ready", async (c) => {
     { ok: boolean; required?: boolean; error?: string; source?: string; detail?: unknown }
   > = {};
 
-  checks.migrations = { ok: false, detail: { expected: migrationExpectation.tag } };
+  checks.migrations = {
+    ok: false,
+    detail:
+      migrationReadinessConfig.mode === "steward-owned"
+        ? {
+            mode: migrationReadinessConfig.mode,
+            expectedSchema: migrationReadinessConfig.expectedSchema,
+          }
+        : { mode: migrationReadinessConfig.mode, expected: migrationExpectation.tag },
+  };
+  if (migrationReadinessConfig.mode === "steward-owned") {
+    checks.coreRepair = { ok: false };
+    checks.authSchema = { ok: false };
+  }
 
   try {
     const db = getDb();
@@ -165,18 +189,22 @@ app.get("/ready", async (c) => {
               SELECT 1 FROM __steward_migrations WHERE tag = ${migrationExpectation.tag}
             ) AS expected_migration_applied
         `)
-      : await db.execute(sql`
-          SELECT
-            EXTRACT(EPOCH FROM clock_timestamp()) * 1000 AS database_time_ms,
-            migrations.hash AS migration_hash,
-            migrations.created_at AS migration_created_at
-          FROM (SELECT 1) AS singleton
-          LEFT JOIN LATERAL (
-            SELECT hash, created_at
-            FROM drizzle.__drizzle_migrations
-            ORDER BY id ASC
-          ) AS migrations ON TRUE
-        `);
+      : migrationReadinessConfig.mode === "steward-owned"
+        ? await db.execute(sql`
+            SELECT EXTRACT(EPOCH FROM clock_timestamp()) * 1000 AS database_time_ms
+          `)
+        : await db.execute(sql`
+            SELECT
+              EXTRACT(EPOCH FROM clock_timestamp()) * 1000 AS database_time_ms,
+              migrations.hash AS migration_hash,
+              migrations.created_at AS migration_created_at
+            FROM (SELECT 1) AS singleton
+            LEFT JOIN LATERAL (
+              SELECT hash, created_at
+              FROM drizzle.__drizzle_migrations
+              ORDER BY id ASC
+            ) AS migrations ON TRUE
+          `);
     const rows = Array.isArray(result)
       ? result
       : ((result as unknown as { rows?: unknown[] }).rows ?? []);
@@ -191,48 +219,96 @@ app.get("/ready", async (c) => {
     const expectedMigrationApplied =
       (row as { expected_migration_applied?: unknown } | undefined)?.expected_migration_applied ===
       true;
-    const migrationLedger = pglite
-      ? []
-      : rows
-          .map((resultRow) => resultRow as Record<string, unknown>)
-          .filter(
-            (resultRow) =>
-              (resultRow.migration_hash !== null && resultRow.migration_hash !== undefined) ||
-              (resultRow.migration_created_at !== null &&
-                resultRow.migration_created_at !== undefined),
-          )
-          .map((resultRow) => ({
-            hash: resultRow.migration_hash,
-            createdAt: resultRow.migration_created_at,
-          }));
-    const migrationReadiness = pglite
-      ? undefined
-      : assessMigrationLedger(migrationLedger, migrationLedgerExpectation.entries);
+    const migrationLedger =
+      pglite || migrationReadinessConfig.mode === "steward-owned"
+        ? []
+        : rows
+            .map((resultRow) => resultRow as Record<string, unknown>)
+            .filter(
+              (resultRow) =>
+                (resultRow.migration_hash !== null && resultRow.migration_hash !== undefined) ||
+                (resultRow.migration_created_at !== null &&
+                  resultRow.migration_created_at !== undefined),
+            )
+            .map((resultRow) => ({
+              hash: resultRow.migration_hash,
+              createdAt: resultRow.migration_created_at,
+            }));
+    const migrationReadiness =
+      pglite || migrationReadinessConfig.mode === "steward-owned"
+        ? undefined
+        : assessMigrationLedger(migrationLedger, migrationLedgerExpectation.entries);
     const databaseSkewMs = Math.abs(Date.now() - databaseTimeMs);
     checks.database = {
       ok: Number.isFinite(databaseTimeMs) && databaseSkewMs <= 30_000,
       detail: { clockSkewMs: Math.round(databaseSkewMs), serverTime: new Date().toISOString() },
     };
-    checks.migrations = {
-      ok: migrationsRan && (pglite ? expectedMigrationApplied : migrationReadiness?.ok === true),
-      detail: {
-        expected: migrationExpectation.tag,
-        expectedCreatedAt: migrationExpectation.createdAt,
-        ...(pglite
-          ? { expectedMigrationApplied }
-          : {
-              actualCreatedAt:
-                migrationLedger.length > 0
-                  ? Math.max(...migrationLedger.map((entry) => Number(entry.createdAt))) || null
-                  : null,
-              ledgerState: migrationReadiness?.state ?? "corrupt",
-              actualCount: migrationReadiness?.actualCount ?? 0,
-              forwardCount: migrationReadiness?.forwardCount ?? 0,
-            }),
-      },
-    };
+    if (pglite || migrationReadinessConfig.mode === "drizzle") {
+      checks.migrations = {
+        ok: migrationsRan && (pglite ? expectedMigrationApplied : migrationReadiness?.ok === true),
+        detail: {
+          mode: migrationReadinessConfig.mode,
+          expected: migrationExpectation.tag,
+          expectedCreatedAt: migrationExpectation.createdAt,
+          ...(pglite
+            ? { expectedMigrationApplied }
+            : {
+                actualCreatedAt:
+                  migrationLedger.length > 0
+                    ? Math.max(...migrationLedger.map((entry) => Number(entry.createdAt))) || null
+                    : null,
+                ledgerState: migrationReadiness?.state ?? "corrupt",
+                actualCount: migrationReadiness?.actualCount ?? 0,
+                forwardCount: migrationReadiness?.forwardCount ?? 0,
+              }),
+        },
+      };
+    }
   } catch {
     checks.database = { ok: false, error: "Database health check failed" };
+  }
+
+  if (migrationReadinessConfig.mode === "steward-owned") {
+    try {
+      if (!stewardReleaseReadinessProbe) {
+        throw new Error("Steward-owned release readiness probe is not configured");
+      }
+      const inspection = await stewardReleaseReadinessProbe();
+      checks.coreRepair = {
+        ok: inspection.core.status === "already_applied",
+        detail: {
+          schema: inspection.core.schema,
+          bundleHash: inspection.core.bundleHash,
+        },
+      };
+      checks.authSchema = {
+        ok: inspection.authSchema.status === "ready",
+        detail: {
+          schema: inspection.authSchema.schema,
+          expectedTip: inspection.authSchema.expectedTip,
+          appliedCount: inspection.authSchema.appliedCount,
+          forwardCount: inspection.authSchema.forwardCount,
+          rpProvenance: inspection.authSchema.rpProvenance,
+        },
+      };
+      checks.migrations = {
+        ok: migrationsRan && checks.coreRepair.ok && checks.authSchema.ok,
+        detail: {
+          mode: migrationReadinessConfig.mode,
+          expectedSchema: migrationReadinessConfig.expectedSchema,
+        },
+      };
+    } catch {
+      checks.coreRepair = { ok: false, error: "Core repair readiness check failed" };
+      checks.authSchema = { ok: false, error: "Auth schema readiness check failed" };
+      checks.migrations = {
+        ok: false,
+        detail: {
+          mode: migrationReadinessConfig.mode,
+          expectedSchema: migrationReadinessConfig.expectedSchema,
+        },
+      };
+    }
   }
 
   try {
@@ -330,10 +406,35 @@ app.get("/ready", async (c) => {
 
 // ─── Database migrations (blocking — must complete before serving traffic) ───
 
+const skipMigrations =
+  process.env.SKIP_MIGRATIONS === "true" || process.env.SKIP_MIGRATIONS === "1";
+
 if (shouldUsePGLite()) {
+  if (migrationReadinessConfig.mode === "steward-owned") {
+    throw new Error("steward-owned migration readiness requires PostgreSQL");
+  }
   migrationsRan = true;
   console.log("[steward] PGLite mode detected — skipping Postgres migrator.");
-} else if (process.env.SKIP_MIGRATIONS === "true" || process.env.SKIP_MIGRATIONS === "1") {
+} else if (migrationReadinessConfig.mode === "steward-owned") {
+  if (!skipMigrations) {
+    throw new Error("steward-owned migration readiness requires SKIP_MIGRATIONS=1");
+  }
+  try {
+    if (!stewardReleaseReadinessProbe) {
+      throw new Error("Steward-owned release readiness probe is not configured");
+    }
+    console.log("[steward] Verifying Steward-owned production migration contracts...");
+    await stewardReleaseReadinessProbe(true);
+    migrationsRan = true;
+    console.log("[steward] Steward-owned production migration contracts are ready.");
+  } catch (err) {
+    console.error(
+      "[steward] Steward-owned migration readiness failed — cannot start",
+      redactedThrownDiagnostics(err),
+    );
+    process.exit(1);
+  }
+} else if (skipMigrations) {
   migrationsRan = true;
   console.log("[steward] SKIP_MIGRATIONS set — skipping auto-migration. Run migrations manually.");
 } else {

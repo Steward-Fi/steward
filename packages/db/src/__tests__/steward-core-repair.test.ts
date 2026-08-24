@@ -26,6 +26,15 @@ import {
   sha256,
   splitStewardMigrationStatements,
 } from "../steward-core-repair-sources";
+import {
+  inspectStewardReleaseReadiness,
+  type StewardReleaseReadinessClient,
+} from "../steward-release-readiness";
+import {
+  getStewardSchemaMigrationExpectations,
+  runStewardSchemaMigrations,
+  type StewardSchemaMigrationClient,
+} from "../steward-schema-migrations";
 
 setDefaultTimeout(300_000);
 
@@ -645,6 +654,47 @@ postgresDescribe("Steward production core repair on disposable PostgreSQL", () =
           verifiedExisting: ["0083_provider_approval_quorum"],
           preflight: null,
         });
+
+        await runStewardSchemaMigrations({
+          client: client as unknown as StewardSchemaMigrationClient,
+          useAdvisoryLock: false,
+        });
+        const releaseReadiness = await inspectStewardReleaseReadiness({
+          expectedSchema: schema,
+          client: client as unknown as StewardReleaseReadinessClient,
+        });
+        expect(releaseReadiness).toMatchObject({
+          status: "ready",
+          schema,
+          core: { status: "already_applied", schema },
+          authSchema: {
+            status: "ready",
+            schema,
+            expectedCount: getStewardSchemaMigrationExpectations().length,
+            appliedCount: getStewardSchemaMigrationExpectations().length,
+            forwardCount: 0,
+            expectedTip: "0001_passkey_rp_provenance_0114",
+            rpProvenance: true,
+          },
+        });
+
+        // A physically missing RP provenance column must fail readiness even
+        // while both Steward-owned marker chains and the unrelated shared
+        // Eliza ledger remain present and unchanged.
+        await client.unsafe(`ALTER TABLE ${quotedSchema}.authenticators DROP COLUMN rp_id`);
+        await expect(
+          inspectStewardReleaseReadiness({
+            expectedSchema: schema,
+            client: client as unknown as StewardReleaseReadinessClient,
+          }),
+        ).rejects.toThrow(/authenticators\.rp_id/);
+
+        const sharedLedgerAfterReadiness = await client.unsafe<
+          { hash: string; created_at: string }[]
+        >("SELECT hash, created_at FROM drizzle.__drizzle_migrations ORDER BY id");
+        expect(sharedLedgerAfterReadiness).toEqual([
+          { hash: "shared-eliza-sentinel", created_at: "1793072800004" },
+        ]);
       } finally {
         await client.end({ timeout: 5 });
       }

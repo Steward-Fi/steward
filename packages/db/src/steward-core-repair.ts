@@ -751,6 +751,38 @@ async function inspectInTransaction(
   };
 }
 
+async function inspectAppliedInTransaction(
+  transaction: StewardCoreRepairExecutor,
+  expectedSchema: StewardCoreRepairSchema,
+): Promise<StewardCoreRepairInspection & { status: "already_applied" }> {
+  await transaction.unsafe("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
+  await transaction.unsafe("SET LOCAL statement_timeout = '2s'");
+  await transaction.unsafe("SET LOCAL idle_in_transaction_session_timeout = '2s'");
+
+  const schema = await resolveTargetSchema(transaction, expectedSchema);
+  const quotedSchema = quoteStewardCoreRepairIdentifier(schema);
+  await transaction.unsafe(`SET LOCAL search_path TO ${quotedSchema}, public, pg_catalog`);
+  const manifest = getSchemaManifest(schema);
+  await assertCatalogPostgresMajor(transaction, manifest);
+  const sources = loadStewardCoreRepairSources(schema);
+  const bundleHash = getBundleHash(schema, sources, manifest);
+  if (!(await ledgerExists(transaction, schema))) {
+    throw new Error("Steward core repair ledger is missing");
+  }
+  await assertLedger(transaction, schema, sources, bundleHash);
+  const catalog = await queryStewardCatalog(transaction, schema);
+  assertCatalogPhase(catalog, manifest.changes, "after", "release-readiness");
+  return {
+    status: "already_applied",
+    schema,
+    bundleHash,
+    verifiedExisting: sources
+      .filter((source) => source.action === "verified_existing")
+      .map((source) => source.tag),
+    preflight: null,
+  };
+}
+
 /**
  * Read-only, repeatable-read inspection of the same catalog and aggregate data
  * gates used by the applying transaction. It does not lock application tables
@@ -765,6 +797,30 @@ export async function inspectStewardCoreRepair(
   try {
     return await client.begin((transaction) =>
       inspectInTransaction(transaction, options.expectedSchema),
+    );
+  } finally {
+    if (ownsClient) {
+      await (client as unknown as { end(options?: { timeout?: number }): Promise<void> }).end({
+        timeout: 5,
+      });
+    }
+  }
+}
+
+/**
+ * Runtime readiness variant of the operator inspector. It only accepts the
+ * fully applied repair, validates both exact provenance and the live reviewed
+ * catalog, and fails immediately when the ledger is absent. Unlike the
+ * operator preflight it never scans production data to determine eligibility.
+ */
+export async function inspectAppliedStewardCoreRepair(
+  options: Pick<RunStewardCoreRepairOptions, "expectedSchema" | "client">,
+): Promise<StewardCoreRepairInspection & { status: "already_applied" }> {
+  const ownsClient = !options.client;
+  const client = options.client ?? (createPostgresClient() as unknown as StewardCoreRepairClient);
+  try {
+    return await client.begin((transaction) =>
+      inspectAppliedInTransaction(transaction, options.expectedSchema),
     );
   } finally {
     if (ownsClient) {

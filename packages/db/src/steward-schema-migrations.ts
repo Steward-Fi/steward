@@ -61,6 +61,20 @@ export type RunStewardSchemaMigrationsOptions = {
   useAdvisoryLock?: boolean;
 };
 
+export type InspectStewardSchemaMigrationsOptions = {
+  client?: StewardSchemaMigrationClient;
+};
+
+export type StewardSchemaMigrationInspection = {
+  status: "ready";
+  schema: string;
+  expectedCount: number;
+  appliedCount: number;
+  forwardCount: number;
+  expectedTip: string;
+  rpProvenance: true;
+};
+
 type AppliedMarker = {
   migration_order: string | number;
   tag: string;
@@ -254,6 +268,120 @@ type RpProvenanceColumn = {
   column_default: string | null;
 };
 
+type BootstrapFunctionCatalogRow = {
+  function_name: string;
+  language_name: string;
+  volatility: string;
+  security_definer: boolean;
+  configuration: string;
+  source: string;
+  acl: string;
+};
+
+type ExpectedBootstrapFunction = {
+  language: "sql" | "plpgsql";
+  volatility: "s" | "v";
+  source: string;
+};
+
+function normalizeFunctionSource(source: string): string {
+  return source.replaceAll("\r\n", "\n").trim();
+}
+
+function getExpectedBootstrapFunctions(schema: string): Map<string, ExpectedBootstrapFunction> {
+  const rendered = renderStewardSchemaMigration(getStewardSchemaMigrationSource(), schema);
+  const functions = new Map<string, ExpectedBootstrapFunction>();
+  const pattern =
+    /CREATE OR REPLACE FUNCTION\s+"steward_bootstrap"\."([^"]+)"\s*\([\s\S]*?\)\s*RETURNS[\s\S]*?\nLANGUAGE\s+(sql|plpgsql)\s*\n(STABLE|VOLATILE)\s*\nSECURITY DEFINER\s*\nSET search_path = pg_catalog\s*\nAS \$\$([\s\S]*?)\$\$;/g;
+  for (const match of rendered.matchAll(pattern)) {
+    const [, name, language, volatility, source] = match;
+    if (!name || !language || !volatility || source === undefined) {
+      throw new Error("Steward bootstrap function source is malformed");
+    }
+    functions.set(name, {
+      language: language as "sql" | "plpgsql",
+      volatility: volatility === "STABLE" ? "s" : "v",
+      source: normalizeFunctionSource(source),
+    });
+  }
+  if (functions.size !== 23) {
+    throw new Error("Steward bootstrap function manifest is incomplete");
+  }
+  return functions;
+}
+
+function releaseMigrationManifestBody(schema: string): string {
+  const quotedSchema = quoteIdentifier(schema);
+  const quotedTable = quoteIdentifier(STEWARD_SCHEMA_MIGRATIONS_TABLE);
+  return `
+      SELECT marker.migration_order, marker.tag, marker.hash, marker.created_at
+      FROM ${quotedSchema}.${quotedTable} marker
+      ORDER BY marker.migration_order
+    `;
+}
+
+async function assertBootstrapFunctionCatalog(
+  transaction: StewardSchemaMigrationExecutor,
+  schema: string,
+): Promise<void> {
+  const rows = await transaction.unsafe<BootstrapFunctionCatalogRow>(`
+    SELECT
+      procedure.proname AS function_name,
+      language.lanname AS language_name,
+      procedure.provolatile::text AS volatility,
+      procedure.prosecdef AS security_definer,
+      COALESCE(array_to_string(procedure.proconfig, ','), '') AS configuration,
+      procedure.prosrc AS source,
+      COALESCE(procedure.proacl::text, '') AS acl
+    FROM pg_catalog.pg_proc procedure
+    JOIN pg_catalog.pg_namespace namespace ON namespace.oid = procedure.pronamespace
+    JOIN pg_catalog.pg_language language ON language.oid = procedure.prolang
+    WHERE namespace.nspname = 'steward_bootstrap'
+    ORDER BY procedure.proname, procedure.oid
+  `);
+  const expected = getExpectedBootstrapFunctions(schema);
+  for (const [name, functionExpectation] of expected) {
+    const matches = rows.filter((row) => row.function_name === name);
+    const actual = matches[0];
+    const mismatch =
+      matches.length !== 1 || !actual
+        ? "identity"
+        : actual.language_name !== functionExpectation.language
+          ? "language"
+          : actual.volatility !== functionExpectation.volatility
+            ? "volatility"
+            : actual.security_definer !== true
+              ? "security"
+              : actual.configuration !== "search_path=pg_catalog"
+                ? "search path"
+                : normalizeFunctionSource(actual.source) !== functionExpectation.source
+                  ? "source"
+                  : /(?:^\{|,)=X\//.test(actual.acl)
+                    ? "ACL"
+                    : undefined;
+    if (mismatch) {
+      throw new Error(
+        `Steward bootstrap function ${name} does not match the release catalog (${mismatch})`,
+      );
+    }
+  }
+
+  const statusRows = rows.filter((row) => row.function_name === "release_migration_manifest");
+  const status = statusRows[0];
+  if (
+    statusRows.length !== 1 ||
+    !status ||
+    status.language_name !== "sql" ||
+    status.volatility !== "s" ||
+    status.security_definer !== true ||
+    status.configuration !== "search_path=pg_catalog" ||
+    normalizeFunctionSource(status.source) !==
+      normalizeFunctionSource(releaseMigrationManifestBody(schema))
+  ) {
+    throw new Error("Steward release migration status function does not match the release catalog");
+  }
+}
+
 async function rpProvenanceColumnExists(
   transaction: StewardSchemaMigrationExecutor,
   schema: string,
@@ -302,8 +430,6 @@ async function installStatusFunction(
   transaction: StewardSchemaMigrationExecutor,
   schema: string,
 ): Promise<void> {
-  const quotedSchema = quoteIdentifier(schema);
-  const quotedTable = quoteIdentifier(STEWARD_SCHEMA_MIGRATIONS_TABLE);
   await transaction.unsafe(`
     CREATE OR REPLACE FUNCTION "steward_bootstrap"."release_migration_manifest"()
     RETURNS TABLE (migration_order bigint, tag text, hash text, created_at bigint)
@@ -312,9 +438,7 @@ async function installStatusFunction(
     SECURITY DEFINER
     SET search_path = pg_catalog
     AS $$
-      SELECT marker.migration_order, marker.tag, marker.hash, marker.created_at
-      FROM ${quotedSchema}.${quotedTable} marker
-      ORDER BY marker.migration_order
+      ${releaseMigrationManifestBody(schema)}
     $$;
     GRANT EXECUTE ON FUNCTION "steward_bootstrap"."release_migration_manifest"() TO PUBLIC;
     COMMENT ON FUNCTION "steward_bootstrap"."release_migration_manifest"() IS
@@ -383,6 +507,68 @@ async function applyInTransaction(
   }
   await installStatusFunction(transaction, schema);
   return { applied, schema };
+}
+
+async function inspectInTransaction(
+  transaction: StewardSchemaMigrationExecutor,
+): Promise<StewardSchemaMigrationInspection> {
+  await transaction.unsafe("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
+  await transaction.unsafe("SET LOCAL statement_timeout = '2s'");
+  await transaction.unsafe("SET LOCAL idle_in_transaction_session_timeout = '2s'");
+
+  const schema = await resolveDataSchema(transaction);
+  await assertBootstrapRelations(transaction, schema);
+  await assertBootstrapFunctionCatalog(transaction, schema);
+  const rows = await transaction.unsafe<AppliedMarker>(
+    `SELECT migration_order, tag, hash, created_at
+     FROM steward_bootstrap.release_migration_manifest()
+     ORDER BY migration_order`,
+  );
+  const expectations = getStewardSchemaMigrationExpectations();
+  const appliedExpectedCount = validateAppliedMarkers(rows, expectations);
+  if (appliedExpectedCount !== expectations.length || rows.length < expectations.length) {
+    throw new Error("Steward-owned schema migrations are behind the required release");
+  }
+  if (!(await rpProvenanceColumnExists(transaction, schema))) {
+    throw new Error(
+      `Steward schema ${schema} has an RP provenance marker without authenticators.rp_id`,
+    );
+  }
+  const expectedTip = expectations.at(-1);
+  if (!expectedTip) throw new Error("Steward schema migration manifest is empty");
+  return {
+    status: "ready",
+    schema,
+    expectedCount: expectations.length,
+    appliedCount: rows.length,
+    forwardCount: rows.length - expectations.length,
+    expectedTip: expectedTip.tag,
+    rpProvenance: true,
+  };
+}
+
+/**
+ * Verify the schema-owned auth compatibility surface without consulting the
+ * shared Drizzle ledger. The SECURITY DEFINER status function is installed by
+ * the operator migration so a least-privileged runtime role can read the exact
+ * append-only marker chain; the physical RP-provenance column and bootstrap
+ * relation prerequisites are checked independently in the same snapshot.
+ */
+export async function inspectStewardSchemaMigrations(
+  options: InspectStewardSchemaMigrationsOptions = {},
+): Promise<StewardSchemaMigrationInspection> {
+  const ownsClient = !options.client;
+  const client =
+    options.client ?? (createPostgresClient() as unknown as StewardSchemaMigrationClient);
+  try {
+    return await client.begin((transaction) => inspectInTransaction(transaction));
+  } finally {
+    if (ownsClient) {
+      await (client as unknown as { end(options?: { timeout?: number }): Promise<void> }).end({
+        timeout: 5,
+      });
+    }
+  }
 }
 
 /**

@@ -8,6 +8,7 @@
     ".": "./src/index.ts",
     "./pglite": "./src/pglite-entry.ts",
     "./steward-core-repair": "./src/steward-core-repair.ts",
+    "./steward-release-readiness": "./src/steward-release-readiness.ts",
     "./steward-schema-migrations": "./src/steward-schema-migrations.ts"
   },
   "scripts": {

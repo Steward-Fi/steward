@@ -136,6 +136,45 @@ After commit, run the read-only command again. It must report
 must still pass its full core-manifest and schema-aware auth-bootstrap checks.
 Do not substitute the repair ledger for `/ready`.
 
+## Candidate startup and readiness contract
+
+Apply the schema-aware 0111–0114 operator migration only after this core repair
+reports `already_applied`:
+
+```bash
+export DATABASE_URL=FROM_SECRET_MANAGER
+bun --cwd packages/db migrate:steward-schema
+```
+
+The production candidate must disable the ordinary shared-ledger migrator and
+select the explicit Steward-owned readiness contract:
+
+```bash
+export NODE_ENV=production
+export SKIP_MIGRATIONS=1
+export STEWARD_MIGRATION_READINESS_MODE=steward-owned
+export STEWARD_CORE_REPAIR_EXPECTED_SCHEMA=steward
+```
+
+In this mode the Bun entrypoint performs a fresh, bounded inspection before it
+opens its listener. Startup requires both:
+
+- the exact #917 core-repair ledger and exact live reviewed 0082–0110 catalog;
+- the exact #915 schema-owned marker chain, exact bootstrap function bodies and
+  security properties, and the physical nullable `authenticators.rp_id`
+  column.
+
+Neither check reads or writes Eliza's shared `drizzle.__drizzle_migrations`
+ledger. Production `SKIP_MIGRATIONS` without an explicit readiness mode is a
+configuration error. `/ready` repeats the same checks through a bounded,
+single-flight cache and exposes only boolean results without the configured
+probe token.
+
+Keep the Railway deployment healthcheck configured (at minimum `/health`) so a
+candidate that exits before its listener cannot displace the healthy image.
+Before routing traffic, require authenticated `/ready` status 200 plus provider
+discovery and the auth acceptance probes from the forward-only exercise below.
+
 ## Disposable PostgreSQL proof
 
 The focused test creates and destroys isolated databases for both layouts. It

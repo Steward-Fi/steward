@@ -8,6 +8,7 @@ import {
   getStewardSchemaMigrationExpectation,
   getStewardSchemaMigrationExpectations,
   getStewardSchemaMigrationSource,
+  inspectStewardSchemaMigrations,
   renderStewardSchemaMigration,
   runStewardSchemaMigrations,
   STEWARD_SCHEMA_MIGRATIONS_TABLE,
@@ -300,6 +301,16 @@ describe("Steward-owned schema compatibility migration", () => {
         });
         await assertInstalled(adapter, schema);
 
+        await expect(inspectStewardSchemaMigrations({ client: adapter })).resolves.toEqual({
+          status: "ready",
+          schema,
+          expectedCount: 2,
+          appliedCount: 2,
+          forwardCount: 0,
+          expectedTip: "0001_passkey_rp_provenance_0114",
+          rpProvenance: true,
+        });
+
         const second = await runStewardSchemaMigrations({
           client: adapter,
           useAdvisoryLock: false,
@@ -311,6 +322,66 @@ describe("Steward-owned schema compatibility migration", () => {
       }
     });
   }
+
+  test("readiness rejects a redefined auth bootstrap function with intact markers", async () => {
+    const client = new PGlite("memory://");
+    const adapter = pgliteAdapter(client);
+    try {
+      await createFixture(adapter, "public");
+      await runStewardSchemaMigrations({ client: adapter, useAdvisoryLock: false });
+      await adapter.unsafe(`
+        CREATE OR REPLACE FUNCTION steward_bootstrap.auth_tenant_config_subject(p_tenant_id text)
+        RETURNS TABLE (
+          auth_abuse_config jsonb, allowed_origins text[], email_config jsonb,
+          oidc_providers jsonb, test_account jsonb, allowed_redirect_urls text[]
+        )
+        LANGUAGE sql
+        STABLE
+        SECURITY DEFINER
+        SET search_path = pg_catalog
+        AS $$
+          SELECT
+            c.auth_abuse_config, c.allowed_origins, c.email_config,
+            c.oidc_providers, c.test_account, c.allowed_redirect_urls
+          FROM public.tenant_configs c
+          WHERE false
+        $$
+      `);
+      await expect(inspectStewardSchemaMigrations({ client: adapter })).rejects.toThrow(
+        /auth_tenant_config_subject.*source/,
+      );
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("readiness rejects a rebound release manifest with intact marker rows", async () => {
+    const client = new PGlite("memory://");
+    const adapter = pgliteAdapter(client);
+    try {
+      await createFixture(adapter, "public");
+      await runStewardSchemaMigrations({ client: adapter, useAdvisoryLock: false });
+      await adapter.unsafe(`
+        CREATE OR REPLACE FUNCTION steward_bootstrap.release_migration_manifest()
+        RETURNS TABLE (migration_order bigint, tag text, hash text, created_at bigint)
+        LANGUAGE sql
+        STABLE
+        SECURITY DEFINER
+        SET search_path = pg_catalog
+        AS $$
+          SELECT marker.migration_order, marker.tag, marker.hash, marker.created_at
+          FROM public.${STEWARD_SCHEMA_MIGRATIONS_TABLE} marker
+          WHERE false
+          ORDER BY marker.migration_order
+        $$
+      `);
+      await expect(inspectStewardSchemaMigrations({ client: adapter })).rejects.toThrow(
+        /status function does not match/,
+      );
+    } finally {
+      await client.close();
+    }
+  });
 
   test("appends 0114 provenance to an existing 0111-0113 marker without rewriting it", async () => {
     const client = new PGlite("memory://");
@@ -556,10 +627,45 @@ postgresDescribe("Steward-owned schema compatibility migration on real Postgres"
         });
         await assertInstalled(adapter, schema, true);
 
+        await expect(inspectStewardSchemaMigrations({ client: adapter })).resolves.toEqual({
+          status: "ready",
+          schema,
+          expectedCount: 2,
+          appliedCount: 2,
+          forwardCount: 0,
+          expectedTip: "0001_passkey_rp_provenance_0114",
+          rpProvenance: true,
+        });
+
         const sharedRows = await client<
           { hash: string; created_at: string | number }[]
         >`SELECT hash, created_at FROM drizzle.__drizzle_migrations`;
         expect(sharedRows).toEqual([
+          { hash: "shared-eliza-sentinel", created_at: "1793072800004" },
+        ]);
+
+        await client.unsafe(
+          `DELETE FROM "${schema}"."${STEWARD_SCHEMA_MIGRATIONS_TABLE}" WHERE migration_order = 2;
+           SELECT setval(
+             pg_get_serial_sequence('${schema}.${STEWARD_SCHEMA_MIGRATIONS_TABLE}', 'migration_order'),
+             1,
+             true
+           )`,
+        );
+        await expect(inspectStewardSchemaMigrations({ client: adapter })).rejects.toThrow(
+          /behind the required release/,
+        );
+
+        await runStewardSchemaMigrations({ client: adapter, useAdvisoryLock: false });
+        await client.unsafe(`ALTER TABLE "${schema}".authenticators DROP COLUMN rp_id`);
+        await expect(inspectStewardSchemaMigrations({ client: adapter })).rejects.toThrow(
+          /authenticators\.rp_id/,
+        );
+
+        const sharedRowsAfterReadiness = await client<
+          { hash: string; created_at: string | number }[]
+        >`SELECT hash, created_at FROM drizzle.__drizzle_migrations`;
+        expect(sharedRowsAfterReadiness).toEqual([
           { hash: "shared-eliza-sentinel", created_at: "1793072800004" },
         ]);
       } finally {
