@@ -14,7 +14,14 @@
 
 import { createHash, timingSafeEqual } from "node:crypto";
 import { validateJwtSecretEnv } from "@stwd/auth";
-import { closeDb, getDb, getMigrationExpectation, runMigrations } from "@stwd/db";
+import {
+  assessMigrationLedger,
+  closeDb,
+  getDb,
+  getMigrationExpectation,
+  getMigrationLedgerExpectation,
+  runMigrations,
+} from "@stwd/db";
 import { shouldUsePGLite } from "@stwd/db/pglite";
 import { redactedThrownDiagnostics } from "@stwd/shared";
 import { sql } from "drizzle-orm";
@@ -52,6 +59,8 @@ import { startWebhookRetryScheduler } from "./services/webhook-retry-scheduler";
 
 const PORT = parseInt(process.env.PORT || "3200", 10);
 const startTime = Date.now();
+const migrationExpectation = getMigrationExpectation();
+const migrationLedgerExpectation = getMigrationLedgerExpectation();
 let migrationsRan = false;
 
 if (!Number.isInteger(PORT) || PORT <= 0) {
@@ -143,8 +152,7 @@ app.get("/ready", async (c) => {
     { ok: boolean; required?: boolean; error?: string; source?: string; detail?: unknown }
   > = {};
 
-  const expectedMigration = getMigrationExpectation();
-  checks.migrations = { ok: false, detail: { expected: expectedMigration.tag } };
+  checks.migrations = { ok: false, detail: { expected: migrationExpectation.tag } };
 
   try {
     const db = getDb();
@@ -154,40 +162,73 @@ app.get("/ready", async (c) => {
           SELECT
             EXTRACT(EPOCH FROM CURRENT_TIMESTAMP) * 1000 AS database_time_ms,
             EXISTS(
-              SELECT 1 FROM __steward_migrations WHERE tag = ${expectedMigration.tag}
+              SELECT 1 FROM __steward_migrations WHERE tag = ${migrationExpectation.tag}
             ) AS expected_migration_applied
         `)
       : await db.execute(sql`
           SELECT
             EXTRACT(EPOCH FROM clock_timestamp()) * 1000 AS database_time_ms,
-            (SELECT MAX(created_at) FROM drizzle.__drizzle_migrations) AS migration_created_at
+            migrations.hash AS migration_hash,
+            migrations.created_at AS migration_created_at
+          FROM (SELECT 1) AS singleton
+          LEFT JOIN LATERAL (
+            SELECT hash, created_at
+            FROM drizzle.__drizzle_migrations
+            ORDER BY id ASC
+          ) AS migrations ON TRUE
         `);
     const rows = Array.isArray(result)
       ? result
       : ((result as unknown as { rows?: unknown[] }).rows ?? []);
     const row = rows[0] as
-      | { database_time_ms?: string | number; migration_created_at?: string | number | null }
+      | {
+          database_time_ms?: string | number;
+          migration_hash?: unknown;
+          migration_created_at?: string | number | null;
+        }
       | undefined;
     const databaseTimeMs = Number(row?.database_time_ms);
-    const migrationCreatedAt = Number(row?.migration_created_at);
     const expectedMigrationApplied =
       (row as { expected_migration_applied?: unknown } | undefined)?.expected_migration_applied ===
       true;
+    const migrationLedger = pglite
+      ? []
+      : rows
+          .map((resultRow) => resultRow as Record<string, unknown>)
+          .filter(
+            (resultRow) =>
+              (resultRow.migration_hash !== null && resultRow.migration_hash !== undefined) ||
+              (resultRow.migration_created_at !== null &&
+                resultRow.migration_created_at !== undefined),
+          )
+          .map((resultRow) => ({
+            hash: resultRow.migration_hash,
+            createdAt: resultRow.migration_created_at,
+          }));
+    const migrationReadiness = pglite
+      ? undefined
+      : assessMigrationLedger(migrationLedger, migrationLedgerExpectation.entries);
     const databaseSkewMs = Math.abs(Date.now() - databaseTimeMs);
     checks.database = {
       ok: Number.isFinite(databaseTimeMs) && databaseSkewMs <= 30_000,
       detail: { clockSkewMs: Math.round(databaseSkewMs), serverTime: new Date().toISOString() },
     };
     checks.migrations = {
-      ok:
-        migrationsRan &&
-        (pglite ? expectedMigrationApplied : migrationCreatedAt === expectedMigration.createdAt),
+      ok: migrationsRan && (pglite ? expectedMigrationApplied : migrationReadiness?.ok === true),
       detail: {
-        expected: expectedMigration.tag,
-        expectedCreatedAt: expectedMigration.createdAt,
+        expected: migrationExpectation.tag,
+        expectedCreatedAt: migrationExpectation.createdAt,
         ...(pglite
           ? { expectedMigrationApplied }
-          : { actualCreatedAt: Number.isFinite(migrationCreatedAt) ? migrationCreatedAt : null }),
+          : {
+              actualCreatedAt:
+                migrationLedger.length > 0
+                  ? Math.max(...migrationLedger.map((entry) => Number(entry.createdAt))) || null
+                  : null,
+              ledgerState: migrationReadiness?.state ?? "corrupt",
+              actualCount: migrationReadiness?.actualCount ?? 0,
+              forwardCount: migrationReadiness?.forwardCount ?? 0,
+            }),
       },
     };
   } catch {
