@@ -42,8 +42,11 @@ type CompatibilityReceipt = {
   postRepair: Partial<Record<CompatibilityProbe, string>>;
   /** Exact candidate after core repair plus the schema-aware auth bundle. */
   candidatePostRepair: Partial<Record<CompatibilityProbe, string>>;
+  /** Exact rollback image after candidate execution and the 0111-0114 bundle. */
+  rollbackPostCandidate: Partial<Record<CompatibilityProbe, string>>;
   providerExecution: {
     drainedBeforeRepair: boolean;
+    drainMaintainedThroughFinalRollback: boolean;
     legacyResume: string;
     candidateEvidenceResumeAndExecution: string;
     rollbackMode: string;
@@ -84,7 +87,7 @@ export function validateStewardCoreRepairOldImageReceipt(
 ): CompatibilityReceipt {
   const receipt = parseReceipt(value);
   if (
-    receipt.proofVersion !== 2 ||
+    receipt.proofVersion !== 3 ||
     receipt.databaseClass !== "isolated-production-restore" ||
     receipt.productionDatabaseTouched !== false ||
     receipt.targetSchema !== "steward" ||
@@ -118,15 +121,17 @@ export function validateStewardCoreRepairOldImageReceipt(
     if (
       receipt.preRepair?.[probe] !== "pass" ||
       receipt.postRepair?.[probe] !== "pass" ||
-      receipt.candidatePostRepair?.[probe] !== "pass"
+      receipt.candidatePostRepair?.[probe] !== "pass" ||
+      receipt.rollbackPostCandidate?.[probe] !== "pass"
     ) {
       throw new Error(
-        `compatibility probe ${probe} is not green on both rollback-image stages and the candidate stage`,
+        `compatibility probe ${probe} is not green on all four isolated-restore stages`,
       );
     }
   }
   if (
     receipt.providerExecution?.drainedBeforeRepair !== true ||
+    receipt.providerExecution?.drainMaintainedThroughFinalRollback !== true ||
     receipt.providerExecution?.legacyResume !== "blocked_by_0084_authority_fence" ||
     receipt.providerExecution?.candidateEvidenceResumeAndExecution !== "pass" ||
     receipt.providerExecution?.rollbackMode !==

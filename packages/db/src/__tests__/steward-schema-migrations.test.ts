@@ -467,6 +467,20 @@ describe("Steward-owned schema compatibility migration", () => {
     }
   });
 
+  test("readiness rejects PUBLIC CREATE on the owner-bound bootstrap schema", async () => {
+    const client = new PGlite("memory://");
+    const adapter = pgliteAdapter(client);
+    try {
+      await createFixture(adapter, "public");
+      await runStewardSchemaMigrations({ client: adapter, useAdvisoryLock: false });
+      await adapter.unsafe("GRANT CREATE ON SCHEMA steward_bootstrap TO PUBLIC");
+
+      await expect(inspectStewardSchemaMigrations({ client: adapter })).rejects.toThrow(/ACL/);
+    } finally {
+      await client.close();
+    }
+  });
+
   test("readiness rejects an unreviewed third-party function grant", async () => {
     const client = new PGlite("memory://");
     const adapter = pgliteAdapter(client);
@@ -1013,6 +1027,160 @@ postgresDescribe("Steward-owned schema compatibility migration on real Postgres"
       await client.end({ timeout: 5 });
     }
   });
+
+  for (const triggerLifetime of ["persistent", "transient"] as const) {
+    test(`rejects ${triggerLifetime} owner-installed marker rewrites and rolls the migration back`, async () => {
+      const database = `steward_schema_marker_${triggerLifetime}_${randomUUID()
+        .replaceAll("-", "")
+        .slice(0, 12)}`;
+      postgresDatabases.push(database);
+      await admin.unsafe(`CREATE DATABASE "${database}"`);
+
+      const targetUrl = new URL(originalUrl);
+      targetUrl.pathname = `/${database}`;
+      targetUrl.searchParams.set("options", "-c search_path=public");
+      const client = postgres(targetUrl.toString(), { max: 1, prepare: false });
+      const adapter = client as unknown as StewardSchemaMigrationClient;
+      try {
+        await createFixture(adapter, "public");
+        await runStewardSchemaMigrations({
+          client: adapter,
+          expectedSchema: "public",
+          useAdvisoryLock: false,
+        });
+        await adapter.unsafe(`
+          DELETE FROM public.${STEWARD_SCHEMA_MIGRATIONS_TABLE} WHERE migration_order = 2;
+          SELECT setval(
+            pg_get_serial_sequence('public.${STEWARD_SCHEMA_MIGRATIONS_TABLE}', 'migration_order'),
+            1,
+            true
+          );
+          ALTER TABLE public.authenticators DROP COLUMN rp_id;
+        `);
+        const originalMarkers = await adapter.unsafe<{
+          migration_order: string | number;
+          tag: string;
+          hash: string;
+          created_at: string | number;
+        }>(`
+          SELECT migration_order, tag, hash, created_at
+          FROM public.${STEWARD_SCHEMA_MIGRATIONS_TABLE}
+          ORDER BY migration_order
+        `);
+        expect(originalMarkers).toHaveLength(1);
+        expect(originalMarkers[0]).toMatchObject({
+          migration_order: "1",
+          tag: getStewardSchemaMigrationExpectations()[0]?.tag,
+          hash: getStewardSchemaMigrationExpectations()[0]?.hash,
+          created_at: String(getStewardSchemaMigrationExpectations()[0]?.createdAt),
+        });
+        const injectedClient: StewardSchemaMigrationClient = {
+          async unsafe<T extends Record<string, unknown>>(query: string, parameters?: unknown[]) {
+            return adapter.unsafe<T>(query, parameters);
+          },
+          async begin<T>(callback: (transaction: StewardSchemaMigrationExecutor) => Promise<T>) {
+            return client.begin(async (sql) => {
+              const transaction = sql as unknown as StewardSchemaMigrationExecutor;
+              let triggerInstalled = false;
+              const executor: StewardSchemaMigrationExecutor = {
+                async unsafe<R extends Record<string, unknown>>(
+                  query: string,
+                  parameters?: unknown[],
+                ) {
+                  const result = await transaction.unsafe<R>(query, parameters);
+                  if (!triggerInstalled && query.includes("AS marker_trigger_count")) {
+                    await transaction.unsafe(`
+                      CREATE FUNCTION public.rewrite_steward_release_marker()
+                      RETURNS trigger
+                      LANGUAGE plpgsql
+                      AS $$
+                      BEGIN
+                        NEW.tag := 'rewritten_' || NEW.tag;
+                        NEW.hash := repeat('0', 64);
+                        NEW.created_at := NEW.created_at + 10;
+                        RETURN NEW;
+                      END
+                      $$;
+                      CREATE TRIGGER rewrite_steward_release_marker
+                      BEFORE INSERT ON public.${STEWARD_SCHEMA_MIGRATIONS_TABLE}
+                      FOR EACH ROW
+                      EXECUTE FUNCTION public.rewrite_steward_release_marker();
+                    `);
+                    triggerInstalled = true;
+                  } else if (
+                    triggerLifetime === "transient" &&
+                    triggerInstalled &&
+                    query.includes(
+                      'CREATE OR REPLACE FUNCTION "steward_bootstrap"."release_migration_manifest"',
+                    )
+                  ) {
+                    await transaction.unsafe(`
+                      DROP TRIGGER rewrite_steward_release_marker
+                        ON public.${STEWARD_SCHEMA_MIGRATIONS_TABLE};
+                      DROP FUNCTION public.rewrite_steward_release_marker();
+                    `);
+                  }
+                  return result;
+                },
+              };
+              return callback(executor);
+            }) as Promise<T>;
+          },
+        };
+
+        const migration = runStewardSchemaMigrations({
+          client: injectedClient,
+          expectedSchema: "public",
+          useAdvisoryLock: false,
+        });
+        if (triggerLifetime === "persistent") {
+          await expect(migration).rejects.toThrow(
+            "Steward release migration marker in public has triggers or rewrite rules",
+          );
+        } else {
+          await expect(migration).rejects.toThrow(
+            "Steward-owned migration ledger does not contain the exact expected release marker at order 2",
+          );
+        }
+
+        const markers = await adapter.unsafe<{
+          migration_order: string | number;
+          tag: string;
+          hash: string;
+          created_at: string | number;
+        }>(`
+          SELECT migration_order, tag, hash, created_at
+          FROM public.${STEWARD_SCHEMA_MIGRATIONS_TABLE}
+          ORDER BY migration_order
+        `);
+        expect(markers).toEqual(originalMarkers);
+        const postcondition = await adapter.unsafe<{
+          rp_provenance: boolean;
+          trigger_count: string | number;
+        }>(`
+          SELECT
+            EXISTS (
+              SELECT 1
+              FROM information_schema.columns
+              WHERE table_schema = 'public'
+                AND table_name = 'authenticators'
+                AND column_name = 'rp_id'
+            ) AS rp_provenance,
+            (
+              SELECT count(*)
+              FROM pg_catalog.pg_trigger trigger_record
+              JOIN pg_catalog.pg_class relation ON relation.oid = trigger_record.tgrelid
+              JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+              WHERE namespace.nspname = 'public'
+                AND relation.relname = '${STEWARD_SCHEMA_MIGRATIONS_TABLE}'
+            ) AS trigger_count
+        `);
+        expect(postcondition).toEqual([{ rp_provenance: false, trigger_count: "0" }]);
+      } finally {
+        await client.end({ timeout: 5 });
+      }
+    });
+  }
 
   for (const schema of ["public", "steward"] as const) {
     test(`installs in the configured ${schema} schema and preserves a shared ledger`, async () => {

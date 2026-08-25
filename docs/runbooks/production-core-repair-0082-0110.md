@@ -273,18 +273,22 @@ export STEWARD_CORE_REPAIR_CANDIDATE_SOURCE=<approved-40-character-commit>
 bun --cwd packages/db check:steward-core-repair-old-image
 ```
 
-The receipt validator pins both image digests and source commits, the repair
+The proof-version 3 receipt validator pins both image digests and source commits, the repair
 version, target schema, and catalog-manifest hash. It hashes the supplied
 evidence artifact itself and requires that exact digest in the receipt. It also
-requires matching rollback-image probes before and after repair, the same full
-probe set on the exact candidate after 0111–0114, automatic migrations disabled
-for both images, proof that the legacy provider resume is blocked by 0084, a
-successful candidate evidence-bearing resume/execution, an explicit
-forward-only rollback mode, and an independent approval bound to the exact
-candidate source and evidence hash. The receipt is a procedural attestation
-reviewed with its evidence; it is not a cryptographic signature, so branch
-protection must independently show the matching external approval. Until it
-passes, the production gate is
+requires four distinct full probe sets: the rollback image before repair, the
+rollback image after the core repair, the exact candidate after 0111–0114, and
+the rollback image again after candidate execution against the final database
+shape. Automatic migrations must be disabled for both images. The receipt also
+requires explicit evidence that the provider-execution drain remained active
+from before repair through the final rollback, proves that the legacy provider
+resume is blocked by 0084, records a successful candidate evidence-bearing
+resume/execution, declares the forward-only rollback mode, and carries an
+independent approval bound to the exact candidate source and evidence hash. The
+receipt is a procedural attestation reviewed with its
+evidence; it is not a cryptographic signature, so branch protection must
+independently show the matching external approval. Until it passes, the
+production gate is
 **NO-GO** even when the repair command reports `eligible`.
 
 ### Forward-only blue/green exercise
@@ -295,8 +299,8 @@ Before production authorization:
    same PostgreSQL major version and `steward,public` search path.
 2. Start the exact current production image against the untouched clone with
    automatic migrations disabled. Capture `/health`, `/ready`, provider
-   discovery, email/passkey session creation and refresh, and a read-only chat
-   smoke.
+   discovery, email/passkey session creation and refresh, and a chat-write
+   probe against disposable clone data.
 3. Drain governed provider execution and stop all database writers. Keep the
    drain active for every remaining step and for any rollback to the old image.
 4. Apply this exact bundle to the clone and restart the same old image without
@@ -308,8 +312,11 @@ Before production authorization:
    an evidence-bearing provider resume and execution and require full
    `/health`, `/ready`, auth, provider, and migration receipts.
 6. Return to the old image once, with provider execution still drained, and
-   repeat only the accepted rollback-scope probes. Generate the external JSON
-   receipt, hash it, obtain independent review, and run the gate command above.
+   repeat every accepted rollback-scope probe into the distinct
+   `rollbackPostCandidate` receipt set. A passing pre-repair or post-core old
+   image probe set must never substitute for this final rollback exercise.
+   Generate the external JSON receipt, hash it, obtain independent review, and
+   run the gate command above.
 7. In production, keep blue available only as a limited auth/health rollback;
    do not re-enable provider execution until green is accepted. A failed green
    deployment requires a forward fix or continued provider drain, not a claim

@@ -166,7 +166,7 @@ function validOldImageCompatibilityReceipt() {
     chatWrite: "pass",
   };
   return {
-    proofVersion: 2,
+    proofVersion: 3,
     databaseClass: "isolated-production-restore",
     productionDatabaseTouched: false,
     targetSchema: "steward",
@@ -185,8 +185,10 @@ function validOldImageCompatibilityReceipt() {
     preRepair: { ...probes },
     postRepair: { ...probes },
     candidatePostRepair: { ...probes },
+    rollbackPostCandidate: { ...probes },
     providerExecution: {
       drainedBeforeRepair: true,
+      drainMaintainedThroughFinalRollback: true,
       legacyResume: "blocked_by_0084_authority_fence",
       candidateEvidenceResumeAndExecution: "pass",
       rollbackMode: "forward_only_old_image_requires_provider_execution_drain",
@@ -233,6 +235,18 @@ describe("Steward production core-repair old-image gate", () => {
       "probe passkeySession is not green",
     );
 
+    const missingFinalRollbackProbe = validOldImageCompatibilityReceipt();
+    missingFinalRollbackProbe.rollbackPostCandidate.passkeySession = "fail";
+    expect(() =>
+      validateStewardCoreRepairOldImageReceipt(missingFinalRollbackProbe, expectedCandidate),
+    ).toThrow("probe passkeySession is not green");
+
+    const supersededProof = validOldImageCompatibilityReceipt();
+    supersededProof.proofVersion = 2;
+    expect(() =>
+      validateStewardCoreRepairOldImageReceipt(supersededProof, expectedCandidate),
+    ).toThrow("does not match the reviewed repair target");
+
     const unboundReview = validOldImageCompatibilityReceipt();
     unboundReview.independentReview.candidateSourceCommit = "f".repeat(40);
     expect(() =>
@@ -243,6 +257,12 @@ describe("Steward production core-repair old-image gate", () => {
     unsafeRollbackClaim.providerExecution.rollbackMode = "full_rollback";
     expect(() =>
       validateStewardCoreRepairOldImageReceipt(unsafeRollbackClaim, expectedCandidate),
+    ).toThrow("does not prove the governed-action boundary");
+
+    const unmaintainedDrain = validOldImageCompatibilityReceipt();
+    unmaintainedDrain.providerExecution.drainMaintainedThroughFinalRollback = false;
+    expect(() =>
+      validateStewardCoreRepairOldImageReceipt(unmaintainedDrain, expectedCandidate),
     ).toThrow("does not prove the governed-action boundary");
 
     const wrongEvidence = validOldImageCompatibilityReceipt();
@@ -615,58 +635,62 @@ postgresDescribe("Steward production core repair on disposable PostgreSQL", () =
     }
   });
 
-  test("rolls back the repair when runtime default privileges grant new objects to a third party", async () => {
-    const { client } = await createFixture("steward");
-    const role = await createUntrustedRole();
-    const quotedRole = quoteStewardCoreRepairIdentifier(role);
-    try {
-      await client.unsafe(`
-        ALTER DEFAULT PRIVILEGES IN SCHEMA steward
-          GRANT UPDATE, TRIGGER ON TABLES TO ${quotedRole};
-        ALTER DEFAULT PRIVILEGES IN SCHEMA steward
-          GRANT EXECUTE ON FUNCTIONS TO ${quotedRole};
-      `);
+  for (const defaultPrivilege of ["table", "function"] as const) {
+    test(`rolls back the repair when runtime default ${defaultPrivilege} privileges grant new objects to a third party`, async () => {
+      const { client } = await createFixture("steward");
+      const role = await createUntrustedRole();
+      const quotedRole = quoteStewardCoreRepairIdentifier(role);
+      const grant =
+        defaultPrivilege === "table"
+          ? `ALTER DEFAULT PRIVILEGES IN SCHEMA steward
+               GRANT UPDATE, TRIGGER ON TABLES TO ${quotedRole}`
+          : `ALTER DEFAULT PRIVILEGES IN SCHEMA steward
+               GRANT EXECUTE ON FUNCTIONS TO ${quotedRole}`;
+      const revoke =
+        defaultPrivilege === "table"
+          ? `ALTER DEFAULT PRIVILEGES IN SCHEMA steward
+               REVOKE UPDATE, TRIGGER ON TABLES FROM ${quotedRole}`
+          : `ALTER DEFAULT PRIVILEGES IN SCHEMA steward
+               REVOKE EXECUTE ON FUNCTIONS FROM ${quotedRole}`;
+      try {
+        await client.unsafe(grant);
 
-      await expect(
-        runStewardCoreRepair({
-          expectedSchema: "steward",
-          client: client as unknown as StewardCoreRepairClient,
-        }),
-      ).rejects.toThrow("target objects grant privileges to an unreviewed role");
+        await expect(
+          runStewardCoreRepair({
+            expectedSchema: "steward",
+            client: client as unknown as StewardCoreRepairClient,
+          }),
+        ).rejects.toThrow("target objects grant privileges to an unreviewed role");
 
-      const state = await client.unsafe<
-        {
-          version_exists: boolean;
-          new_relation_exists: boolean;
-          ledger_exists: boolean;
-        }[]
-      >(`
-        SELECT
-          EXISTS (
-            SELECT 1 FROM pg_catalog.pg_attribute attribute
-            JOIN pg_catalog.pg_class relation ON relation.oid = attribute.attrelid
-            WHERE relation.oid = 'steward.execution_authorization_nonces'::regclass
-              AND attribute.attname = 'version'
-              AND attribute.attnum > 0 AND NOT attribute.attisdropped
-          ) AS version_exists,
-          pg_catalog.to_regclass('steward.provider_action_reservation_generations') IS NOT NULL
-            AS new_relation_exists,
-          pg_catalog.to_regclass('steward.${STEWARD_CORE_REPAIR_LEDGER}') IS NOT NULL
-            AS ledger_exists
-      `);
-      expect(state).toEqual([
-        { version_exists: false, new_relation_exists: false, ledger_exists: false },
-      ]);
-    } finally {
-      await client.unsafe(`
-        ALTER DEFAULT PRIVILEGES IN SCHEMA steward
-          REVOKE UPDATE, TRIGGER ON TABLES FROM ${quotedRole};
-        ALTER DEFAULT PRIVILEGES IN SCHEMA steward
-          REVOKE EXECUTE ON FUNCTIONS FROM ${quotedRole};
-      `);
-      await client.end({ timeout: 5 });
-    }
-  });
+        const state = await client.unsafe<
+          {
+            version_exists: boolean;
+            new_relation_exists: boolean;
+            ledger_exists: boolean;
+          }[]
+        >(`
+          SELECT
+            EXISTS (
+              SELECT 1 FROM pg_catalog.pg_attribute attribute
+              JOIN pg_catalog.pg_class relation ON relation.oid = attribute.attrelid
+              WHERE relation.oid = 'steward.execution_authorization_nonces'::regclass
+                AND attribute.attname = 'version'
+                AND attribute.attnum > 0 AND NOT attribute.attisdropped
+            ) AS version_exists,
+            pg_catalog.to_regclass('steward.provider_action_reservation_generations') IS NOT NULL
+              AS new_relation_exists,
+            pg_catalog.to_regclass('steward.${STEWARD_CORE_REPAIR_LEDGER}') IS NOT NULL
+              AS ledger_exists
+        `);
+        expect(state).toEqual([
+          { version_exists: false, new_relation_exists: false, ledger_exists: false },
+        ]);
+      } finally {
+        await client.unsafe(revoke);
+        await client.end({ timeout: 5 });
+      }
+    });
+  }
 
   test("keeps pg_catalog ahead of a runtime-owned target-schema builtin shadow", async () => {
     const { client } = await createFixture("steward");

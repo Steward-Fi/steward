@@ -264,6 +264,8 @@ type MigrationCatalogTrustRow = {
   marker_owned_by_runtime: boolean;
   unexpected_marker_relation_grant: boolean;
   unexpected_marker_column_grant: boolean;
+  marker_trigger_count: string | number;
+  marker_rule_count: string | number;
   untrusted_required_relation_count: string | number;
   unexpected_required_relation_grant: boolean;
   unexpected_required_column_grant: boolean;
@@ -342,6 +344,20 @@ async function assertMigrationCatalogTrust(
         ) AS unexpected_marker_column_grant,
         (
           SELECT count(*)
+          FROM pg_catalog.pg_trigger trigger_record
+          JOIN pg_catalog.pg_class relation ON relation.oid = trigger_record.tgrelid
+          WHERE relation.relnamespace = namespace.oid
+            AND relation.relname = $2
+        ) AS marker_trigger_count,
+        (
+          SELECT count(*)
+          FROM pg_catalog.pg_rewrite rewrite_rule
+          JOIN pg_catalog.pg_class relation ON relation.oid = rewrite_rule.ev_class
+          WHERE relation.relnamespace = namespace.oid
+            AND relation.relname = $2
+        ) AS marker_rule_count,
+        (
+          SELECT count(*)
           FROM pg_catalog.pg_class relation
           WHERE relation.relnamespace = namespace.oid
             AND relation.relname IN (${relationLiterals})
@@ -399,6 +415,9 @@ async function assertMigrationCatalogTrust(
   ) {
     throw new Error(`Steward release migration marker in ${schema} grants unsafe privileges`);
   }
+  if (Number(trust.marker_trigger_count) !== 0 || Number(trust.marker_rule_count) !== 0) {
+    throw new Error(`Steward release migration marker in ${schema} has triggers or rewrite rules`);
+  }
   if (Number(trust.untrusted_required_relation_count) !== 0) {
     throw new Error(`Steward schema ${schema} contains untrusted bootstrap relations`);
   }
@@ -443,6 +462,24 @@ function validateAppliedMarkers(
   return Math.min(rows.length, expectations.length);
 }
 
+async function assertPersistedMigrationMarkers(
+  transaction: StewardSchemaMigrationExecutor,
+  schema: string,
+  expectations: StewardSchemaMigrationExpectation[],
+): Promise<void> {
+  const quotedSchema = quoteIdentifier(schema);
+  const quotedTable = quoteIdentifier(STEWARD_SCHEMA_MIGRATIONS_TABLE);
+  const rows = await transaction.unsafe<AppliedMarker>(`
+    SELECT migration_order, tag, hash, created_at
+    FROM ${quotedSchema}.${quotedTable}
+    ORDER BY migration_order
+  `);
+  const appliedExpectedCount = validateAppliedMarkers(rows, expectations);
+  if (appliedExpectedCount !== expectations.length || rows.length < expectations.length) {
+    throw new Error("Steward-owned migration ledger did not persist the required release markers");
+  }
+}
+
 type RpProvenanceColumn = {
   data_type: string;
   character_maximum_length: string | number | null;
@@ -465,7 +502,7 @@ type BootstrapFunctionCatalogRow = {
   public_execute: boolean;
   unexpected_execute_grant: boolean;
   bootstrap_schema_owner: string;
-  public_schema_usage: boolean;
+  public_schema_grant: boolean;
   unexpected_schema_grant: boolean;
 };
 
@@ -581,8 +618,7 @@ async function assertBootstrapFunctionCatalog(
           COALESCE(namespace.nspacl, pg_catalog.acldefault('n', namespace.nspowner))
         ) AS schema_acl
         WHERE schema_acl.grantee = 0
-          AND schema_acl.privilege_type = 'USAGE'
-      ) AS public_schema_usage,
+      ) AS public_schema_grant,
       EXISTS (
         SELECT 1
         FROM pg_catalog.aclexplode(
@@ -631,7 +667,7 @@ async function assertBootstrapFunctionCatalog(
                               actual.bootstrap_schema_owner !== actual.runtime_role
                             ? "owner"
                             : actual.unexpected_execute_grant ||
-                                actual.public_schema_usage ||
+                                actual.public_schema_grant ||
                                 actual.unexpected_schema_grant
                               ? "ACL"
                               : undefined;
@@ -662,7 +698,7 @@ async function assertBootstrapFunctionCatalog(
     status.owner_name !== status.runtime_role ||
     status.bootstrap_schema_owner !== status.runtime_role ||
     status.unexpected_execute_grant !== false ||
-    status.public_schema_usage !== false ||
+    status.public_schema_grant !== false ||
     status.unexpected_schema_grant !== false ||
     normalizeFunctionSource(status.source) !==
       normalizeFunctionSource(releaseMigrationManifestBody(schema))
@@ -782,6 +818,7 @@ async function applyInTransaction(
     await installStatusFunction(transaction, schema);
     await assertBootstrapFunctionCatalog(transaction, schema);
     await assertMigrationCatalogTrust(transaction, schema);
+    await assertPersistedMigrationMarkers(transaction, schema, expectations);
     return { applied: [], schema };
   }
 
@@ -812,6 +849,7 @@ async function applyInTransaction(
   await installStatusFunction(transaction, schema);
   await assertBootstrapFunctionCatalog(transaction, schema);
   await assertMigrationCatalogTrust(transaction, schema);
+  await assertPersistedMigrationMarkers(transaction, schema, expectations);
   return { applied, schema };
 }
 
