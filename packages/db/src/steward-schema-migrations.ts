@@ -45,8 +45,14 @@ export interface StewardSchemaMigrationExecutor {
   ): Promise<T[]>;
 }
 
+export interface StewardSchemaMigrationReservedClient extends StewardSchemaMigrationExecutor {
+  release(): void;
+}
+
 export interface StewardSchemaMigrationClient extends StewardSchemaMigrationExecutor {
   begin<T>(callback: (transaction: StewardSchemaMigrationExecutor) => Promise<T>): Promise<T>;
+  reserve?(): Promise<StewardSchemaMigrationReservedClient>;
+  end?(options?: { timeout?: number }): Promise<void>;
 }
 
 export type StewardSchemaMigrationExpectation = {
@@ -188,12 +194,75 @@ function assertSafeDataSchema(schema: string): void {
 
 async function resolveDataSchema(transaction: StewardSchemaMigrationExecutor): Promise<string> {
   const rows = await transaction.unsafe<{ schema_name: string | null }>(
-    "SELECT current_schema()::text AS schema_name",
+    "SELECT pg_catalog.current_schema()::text AS schema_name",
   );
   const schema = rows[0]?.schema_name;
   if (!schema) throw new Error("DATABASE_URL search_path resolves to no writable data schema");
   assertSafeDataSchema(schema);
   return schema;
+}
+
+type CapturedOutcome<T> = { ok: true; value: T } | { ok: false; error: unknown };
+
+class ReservedTransactionCleanupError extends AggregateError {}
+
+async function captureOutcome<T>(operation: () => Promise<T>): Promise<CapturedOutcome<T>> {
+  try {
+    return { ok: true, value: await operation() };
+  } catch (error) {
+    return { ok: false, error };
+  }
+}
+
+async function runReservedTransaction<T>(
+  connection: StewardSchemaMigrationExecutor,
+  operation: (transaction: StewardSchemaMigrationExecutor) => Promise<T>,
+): Promise<T> {
+  const begin = await captureOutcome(async () => {
+    await connection.unsafe("BEGIN");
+  });
+  if (!begin.ok) {
+    const rollback = await captureOutcome(async () => {
+      await connection.unsafe("ROLLBACK");
+    });
+    if (!rollback.ok) {
+      throw new ReservedTransactionCleanupError(
+        [begin.error, rollback.error],
+        "schema-migration transaction start was uncertain and could not be rolled back",
+      );
+    }
+    throw begin.error;
+  }
+
+  const result = await captureOutcome(() => operation(connection));
+  if (result.ok) {
+    const commit = await captureOutcome(async () => {
+      await connection.unsafe("COMMIT");
+    });
+    if (commit.ok) return result.value;
+
+    const rollback = await captureOutcome(async () => {
+      await connection.unsafe("ROLLBACK");
+    });
+    if (!rollback.ok) {
+      throw new ReservedTransactionCleanupError(
+        [commit.error, rollback.error],
+        "schema-migration commit failed and its reserved transaction could not be rolled back",
+      );
+    }
+    throw commit.error;
+  }
+
+  const rollback = await captureOutcome(async () => {
+    await connection.unsafe("ROLLBACK");
+  });
+  if (!rollback.ok) {
+    throw new ReservedTransactionCleanupError(
+      [result.error, rollback.error],
+      "schema migration failed and its reserved transaction could not be rolled back",
+    );
+  }
+  throw result.error;
 }
 
 async function assertBootstrapRelations(
@@ -645,25 +714,96 @@ export async function runStewardSchemaMigrations(
   const client =
     options.client ?? (createPostgresClient() as unknown as StewardSchemaMigrationClient);
   const useAdvisoryLock = options.useAdvisoryLock ?? true;
+  let reserved: StewardSchemaMigrationReservedClient | undefined;
+  let clientClosed = false;
+
+  const closeClient = async (timeout: number): Promise<void> => {
+    if (!client.end) throw new Error("schema-migration database client cannot be closed");
+    await client.end({ timeout });
+  };
+
+  const quarantineReservedClient = async (errors: unknown[], message: string): Promise<void> => {
+    reserved = undefined;
+    clientClosed = true;
+    const close = await captureOutcome(() => closeClient(0));
+    if (!close.ok) throw new AggregateError([...errors, close.error], message);
+  };
 
   try {
     if (useAdvisoryLock) {
-      await client.unsafe("SELECT pg_advisory_lock(hashtextextended($1, 0))", [ADVISORY_LOCK_KEY]);
-    }
-    try {
-      return await client.begin((transaction) => applyInTransaction(transaction));
-    } finally {
-      if (useAdvisoryLock) {
-        await client.unsafe("SELECT pg_advisory_unlock(hashtextextended($1, 0))", [
-          ADVISORY_LOCK_KEY,
-        ]);
+      if (!client.reserve) {
+        throw new Error("schema-migration advisory lock requires a reserved database connection");
       }
-    }
-  } finally {
-    if (ownsClient) {
-      await (client as unknown as { end(options?: { timeout?: number }): Promise<void> }).end({
-        timeout: 5,
+      const connection = await client.reserve();
+      reserved = connection;
+      const acquisition = await captureOutcome(() =>
+        connection.unsafe<{ acquired: boolean }>(
+          "SELECT pg_catalog.pg_try_advisory_lock(pg_catalog.hashtextextended($1, 0)) AS acquired",
+          [ADVISORY_LOCK_KEY],
+        ),
+      );
+      if (!acquisition.ok) {
+        await quarantineReservedClient(
+          [acquisition.error],
+          "schema-migration advisory-lock acquisition was uncertain and its client could not be quarantined",
+        );
+        throw acquisition.error;
+      }
+      if (acquisition.value[0]?.acquired === false) {
+        throw new Error("another Steward schema migration already holds the advisory lock");
+      }
+      if (acquisition.value[0]?.acquired !== true) {
+        const error = new Error(
+          "schema-migration advisory-lock acquisition returned an invalid result",
+        );
+        await quarantineReservedClient(
+          [error],
+          "schema-migration advisory-lock acquisition was uncertain and its client could not be quarantined",
+        );
+        throw error;
+      }
+
+      const migration = await captureOutcome(() =>
+        runReservedTransaction(connection, applyInTransaction),
+      );
+      const unlock = await captureOutcome(async () => {
+        const rows = await connection.unsafe<{ released: boolean }>(
+          "SELECT pg_catalog.pg_advisory_unlock(pg_catalog.hashtextextended($1, 0)) AS released",
+          [ADVISORY_LOCK_KEY],
+        );
+        if (rows[0]?.released !== true) {
+          throw new Error("schema-migration advisory lock was not held by its reserved connection");
+        }
       });
+      const cleanupUncertain =
+        !unlock.ok || (!migration.ok && migration.error instanceof ReservedTransactionCleanupError);
+      if (cleanupUncertain) {
+        const errors: unknown[] = [];
+        if (!migration.ok) errors.push(migration.error);
+        if (!unlock.ok) errors.push(unlock.error);
+        await quarantineReservedClient(
+          errors,
+          "schema migration could not prove reserved-session cleanup or quarantine its client",
+        );
+      }
+      if (!unlock.ok) {
+        if (!migration.ok) {
+          throw new AggregateError(
+            [migration.error, unlock.error],
+            "schema migration failed and its reserved advisory lock could not be released",
+          );
+        }
+        throw unlock.error;
+      }
+      if (!migration.ok) throw migration.error;
+      return migration.value;
+    }
+
+    return await client.begin((transaction) => applyInTransaction(transaction));
+  } finally {
+    reserved?.release();
+    if (ownsClient && !clientClosed) {
+      await closeClient(5);
     }
   }
 }
