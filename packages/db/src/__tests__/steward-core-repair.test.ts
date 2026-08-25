@@ -166,7 +166,7 @@ function validOldImageCompatibilityReceipt() {
     chatWrite: "pass",
   };
   return {
-    proofVersion: 1,
+    proofVersion: 2,
     databaseClass: "isolated-production-restore",
     productionDatabaseTouched: false,
     targetSchema: "steward",
@@ -184,13 +184,19 @@ function validOldImageCompatibilityReceipt() {
     },
     preRepair: { ...probes },
     postRepair: { ...probes },
+    candidatePostRepair: { ...probes },
     providerExecution: {
       drainedBeforeRepair: true,
       legacyResume: "blocked_by_0084_authority_fence",
       candidateEvidenceResumeAndExecution: "pass",
       rollbackMode: "forward_only_old_image_requires_provider_execution_drain",
     },
-    reviewedBy: "lalalune",
+    independentReview: {
+      reviewedBy: "lalalune",
+      disposition: "approved",
+      candidateSourceCommit: expectedCandidate.sourceCommit,
+      evidenceArtifactSha256: expectedCandidate.evidenceArtifactSha256,
+    },
     evidenceArtifactSha256: expectedCandidate.evidenceArtifactSha256,
   };
 }
@@ -222,10 +228,16 @@ describe("Steward production core-repair old-image gate", () => {
     ).toThrow("does not pin the approved candidate image");
 
     const missingProbe = validOldImageCompatibilityReceipt();
-    missingProbe.postRepair.passkeySession = "fail";
+    missingProbe.candidatePostRepair.passkeySession = "fail";
     expect(() => validateStewardCoreRepairOldImageReceipt(missingProbe, expectedCandidate)).toThrow(
       "probe passkeySession is not green",
     );
+
+    const unboundReview = validOldImageCompatibilityReceipt();
+    unboundReview.independentReview.candidateSourceCommit = "f".repeat(40);
+    expect(() =>
+      validateStewardCoreRepairOldImageReceipt(unboundReview, expectedCandidate),
+    ).toThrow("independent approval bound to the candidate and evidence");
 
     const unsafeRollbackClaim = validOldImageCompatibilityReceipt();
     unsafeRollbackClaim.providerExecution.rollbackMode = "full_rollback";
@@ -433,6 +445,7 @@ postgresDescribe("Steward production core repair on disposable PostgreSQL", () =
     onnotice: () => {},
   });
   const databases: string[] = [];
+  const roles: string[] = [];
 
   afterAll(async () => {
     for (const database of databases) {
@@ -440,8 +453,18 @@ postgresDescribe("Steward production core repair on disposable PostgreSQL", () =
         `DROP DATABASE IF EXISTS ${quoteStewardCoreRepairIdentifier(database)} WITH (FORCE)`,
       );
     }
+    for (const role of roles) {
+      await admin.unsafe(`DROP ROLE IF EXISTS ${quoteStewardCoreRepairIdentifier(role)}`);
+    }
     await admin.end({ timeout: 5 });
   });
+
+  async function createUntrustedRole(): Promise<string> {
+    const role = `repair_attacker_${randomUUID().replaceAll("-", "")}`;
+    roles.push(role);
+    await admin.unsafe(`CREATE ROLE ${quoteStewardCoreRepairIdentifier(role)}`);
+    return role;
+  }
 
   async function createFixture(schema: StewardCoreRepairSchema, include0083 = true) {
     const database = `steward_core_repair_test_${schema}_${randomUUID().replaceAll("-", "")}`;
@@ -483,6 +506,145 @@ postgresDescribe("Steward production core repair on disposable PostgreSQL", () =
           client: client as unknown as StewardCoreRepairClient,
         }),
       ).rejects.toThrow("unsupported core-repair schema shadow_test");
+    } finally {
+      await client.end({ timeout: 5 });
+    }
+  });
+
+  test("rejects an unreviewed CREATE grant on the repair target schema", async () => {
+    const { client } = await createFixture("steward");
+    const role = await createUntrustedRole();
+    try {
+      await client.unsafe(
+        `GRANT CREATE ON SCHEMA steward TO ${quoteStewardCoreRepairIdentifier(role)}`,
+      );
+
+      await expect(
+        inspectStewardCoreRepair({
+          expectedSchema: "steward",
+          client: client as unknown as StewardCoreRepairClient,
+        }),
+      ).rejects.toThrow("target schema grants CREATE to an unreviewed role");
+    } finally {
+      await client.end({ timeout: 5 });
+    }
+  });
+
+  test("rejects target-schema objects owned by an unreviewed role", async () => {
+    const { client } = await createFixture("steward");
+    const role = await createUntrustedRole();
+    const quotedRole = quoteStewardCoreRepairIdentifier(role);
+    try {
+      await client.unsafe(`
+        GRANT USAGE, CREATE ON SCHEMA steward TO ${quotedRole};
+        SET ROLE ${quotedRole};
+        CREATE FUNCTION steward.lower(text)
+        RETURNS text
+        LANGUAGE sql
+        IMMUTABLE
+        AS $$ SELECT 'shadowed'::text $$;
+        RESET ROLE;
+        REVOKE USAGE, CREATE ON SCHEMA steward FROM ${quotedRole};
+      `);
+
+      await expect(
+        inspectStewardCoreRepair({
+          expectedSchema: "steward",
+          client: client as unknown as StewardCoreRepairClient,
+        }),
+      ).rejects.toThrow("target schema contains objects owned by an unreviewed role");
+    } finally {
+      await client.end({ timeout: 5 });
+    }
+  });
+
+  test("rejects target-schema types owned by an unreviewed role", async () => {
+    const { client } = await createFixture("steward");
+    const role = await createUntrustedRole();
+    const quotedRole = quoteStewardCoreRepairIdentifier(role);
+    try {
+      await client.unsafe(`
+        GRANT USAGE, CREATE ON SCHEMA steward TO ${quotedRole};
+        SET ROLE ${quotedRole};
+        CREATE TYPE steward.shadow_enum AS ENUM ('shadowed');
+        RESET ROLE;
+        REVOKE USAGE, CREATE ON SCHEMA steward FROM ${quotedRole};
+      `);
+
+      await expect(
+        inspectStewardCoreRepair({
+          expectedSchema: "steward",
+          client: client as unknown as StewardCoreRepairClient,
+        }),
+      ).rejects.toThrow("target schema contains objects owned by an unreviewed role");
+    } finally {
+      await client.end({ timeout: 5 });
+    }
+  });
+
+  test("rejects target-object grants that can preinstall or invoke unreviewed behavior", async () => {
+    const { client } = await createFixture("steward");
+    const role = await createUntrustedRole();
+    const quotedRole = quoteStewardCoreRepairIdentifier(role);
+    const inspect = () =>
+      inspectStewardCoreRepair({
+        expectedSchema: "steward",
+        client: client as unknown as StewardCoreRepairClient,
+      });
+    try {
+      await client.unsafe(`GRANT TRIGGER ON steward.agents TO ${quotedRole}`);
+      await expect(inspect()).rejects.toThrow(
+        "target objects grant privileges to an unreviewed role",
+      );
+      await client.unsafe(`REVOKE TRIGGER ON steward.agents FROM ${quotedRole}`);
+
+      await client.unsafe(`GRANT UPDATE (name) ON steward.agents TO ${quotedRole}`);
+      await expect(inspect()).rejects.toThrow(
+        "target objects grant privileges to an unreviewed role",
+      );
+      await client.unsafe(`REVOKE UPDATE (name) ON steward.agents FROM ${quotedRole}`);
+
+      await client.unsafe(
+        `GRANT EXECUTE ON FUNCTION steward.steward_provider_action_binding_guard() TO ${quotedRole}`,
+      );
+      await expect(inspect()).rejects.toThrow(
+        "target objects grant privileges to an unreviewed role",
+      );
+    } finally {
+      await client.end({ timeout: 5 });
+    }
+  });
+
+  test("keeps pg_catalog ahead of a runtime-owned target-schema builtin shadow", async () => {
+    const { client } = await createFixture("steward");
+    try {
+      await client.unsafe(`
+        CREATE FUNCTION steward.lower(text)
+        RETURNS text
+        LANGUAGE sql
+        IMMUTABLE
+        AS $$ SELECT 'shadowed'::text $$;
+        INSERT INTO steward.tenants (id, name, api_key_hash)
+        VALUES ('tenant-shadow-fixture', 'Shadow fixture', 'shadow-fixture-key');
+        INSERT INTO steward.agents (id, tenant_id, name, wallet_address)
+        VALUES (
+          'agent-shadow-fixture',
+          'tenant-shadow-fixture',
+          'Shadow fixture',
+          '0x3333333333333333333333333333333333333333'
+        );
+        INSERT INTO steward.evm_wallet_nonces (wallet_address, chain_id, next_nonce)
+        VALUES ('0x3333333333333333333333333333333333333333', 1, 1);
+      `);
+
+      const inspection = await inspectStewardCoreRepair({
+        expectedSchema: "steward",
+        client: client as unknown as StewardCoreRepairClient,
+      });
+
+      expect(inspection.status).toBe("eligible");
+      expect(inspection.preflight?.evmNonceNamespaces).toBe(1);
+      expect(inspection.preflight?.unresolvedEvmNonceNamespaces).toBe(0);
     } finally {
       await client.end({ timeout: 5 });
     }
@@ -553,6 +715,12 @@ postgresDescribe("Steward production core repair on disposable PostgreSQL", () =
           evmNonceNamespaces: 1,
           unresolvedEvmNonceNamespaces: 0,
         });
+        const systemCatalogLeak = await client.unsafe<{ leaked_relation: string | null }[]>(`
+          SELECT pg_catalog.to_regclass(
+            'pg_catalog.provider_action_reservation_generations'
+          )::text AS leaked_relation
+        `);
+        expect(systemCatalogLeak).toEqual([{ leaked_relation: null }]);
         const advisoryLocks = await client.unsafe<{ count: number }[]>(`
           SELECT count(*)::int AS count
           FROM pg_catalog.pg_locks
@@ -657,6 +825,7 @@ postgresDescribe("Steward production core repair on disposable PostgreSQL", () =
 
         await runStewardSchemaMigrations({
           client: client as unknown as StewardSchemaMigrationClient,
+          expectedSchema: schema,
           useAdvisoryLock: false,
         });
         const releaseReadiness = await inspectStewardReleaseReadiness({

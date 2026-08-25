@@ -979,6 +979,14 @@ export class StewardAuth {
     // brand-new, signed-out user can register their FIRST passkey — the
     // grant proves ownership of the email. Without it, register/options
     // requires an authenticated session.
+    const sessionToken = emailGrant ? null : this.getToken();
+    if (!emailGrant && !sessionToken) {
+      throw new StewardApiError(
+        "Not authenticated. Sign in first or provide a verified-email grant.",
+        0,
+      );
+    }
+
     const regOptsRes = await authRequest<Record<string, unknown>>(
       this.baseUrl,
       "/auth/passkey/register/options",
@@ -990,6 +998,7 @@ export class StewardAuth {
           ...(this.tenantId ? { tenantId: this.tenantId } : {}),
         }),
       },
+      sessionToken,
     );
 
     if (!regOptsRes.ok) {
@@ -1023,6 +1032,7 @@ export class StewardAuth {
           ...(this.tenantId ? { tenantId: this.tenantId } : {}),
         }),
       },
+      sessionToken,
     );
 
     if (!verifyRes.ok) {

@@ -332,6 +332,139 @@ async function resolveTargetSchema(
   return schema;
 }
 
+type RepairSchemaTrustRow = {
+  runtime_owns_schema: boolean;
+  unexpected_create_grant: boolean;
+  unexpected_relation_grant: boolean;
+  unexpected_column_grant: boolean;
+  unexpected_function_grant: boolean;
+  unowned_relation_count: string | number;
+  unowned_function_count: string | number;
+  unowned_type_count: string | number;
+};
+
+/**
+ * The repair executes reviewed migration SQL with owner authority. Require a
+ * closed target namespace before setting any unqualified lookup path: the
+ * effective role must be the exact schema/database owner, no third party may
+ * CREATE objects there, and no existing target objects may remain owned by a
+ * different role. This prevents pre-positioned function/relation shadowing.
+ */
+async function assertTrustedRepairSchema(
+  transaction: StewardCoreRepairExecutor,
+  schema: StewardCoreRepairSchema,
+): Promise<void> {
+  const rows = await transaction.unsafe<RepairSchemaTrustRow>(
+    `
+      SELECT
+        (
+          namespace.nspowner = runtime_role.oid
+          OR (
+            namespace.nspowner = database_owner_role.oid
+            AND database.datdba = runtime_role.oid
+          )
+        ) AS runtime_owns_schema,
+        EXISTS (
+          SELECT 1
+          FROM pg_catalog.aclexplode(
+            COALESCE(namespace.nspacl, pg_catalog.acldefault('n', namespace.nspowner))
+          ) AS schema_acl
+          WHERE schema_acl.privilege_type = 'CREATE'
+            AND schema_acl.grantee NOT IN (
+              namespace.nspowner,
+              runtime_role.oid
+            )
+        ) AS unexpected_create_grant,
+        EXISTS (
+          SELECT 1
+          FROM pg_catalog.pg_class relation
+          JOIN pg_catalog.pg_namespace relation_namespace
+            ON relation_namespace.oid = relation.relnamespace
+          CROSS JOIN LATERAL pg_catalog.aclexplode(relation.relacl) AS relation_acl
+          WHERE relation_namespace.nspname = $1
+            AND relation_acl.grantee NOT IN (relation.relowner, runtime_role.oid)
+        ) AS unexpected_relation_grant,
+        EXISTS (
+          SELECT 1
+          FROM pg_catalog.pg_attribute attribute
+          JOIN pg_catalog.pg_class relation ON relation.oid = attribute.attrelid
+          JOIN pg_catalog.pg_namespace relation_namespace
+            ON relation_namespace.oid = relation.relnamespace
+          CROSS JOIN LATERAL pg_catalog.aclexplode(attribute.attacl) AS column_acl
+          WHERE relation_namespace.nspname = $1
+            AND attribute.attnum > 0
+            AND NOT attribute.attisdropped
+            AND column_acl.grantee NOT IN (relation.relowner, runtime_role.oid)
+        ) AS unexpected_column_grant,
+        EXISTS (
+          SELECT 1
+          FROM pg_catalog.pg_proc procedure
+          JOIN pg_catalog.pg_namespace procedure_namespace
+            ON procedure_namespace.oid = procedure.pronamespace
+          CROSS JOIN LATERAL pg_catalog.aclexplode(
+            COALESCE(procedure.proacl, pg_catalog.acldefault('f', procedure.proowner))
+          ) AS function_acl
+          WHERE procedure_namespace.nspname = $1
+            AND function_acl.grantee NOT IN (0, procedure.proowner, runtime_role.oid)
+        ) AS unexpected_function_grant,
+        (
+          SELECT count(*)
+          FROM pg_catalog.pg_class relation
+          JOIN pg_catalog.pg_namespace relation_namespace
+            ON relation_namespace.oid = relation.relnamespace
+          WHERE relation_namespace.nspname = $1
+            AND relation.relowner <> runtime_role.oid
+        ) AS unowned_relation_count,
+        (
+          SELECT count(*)
+          FROM pg_catalog.pg_proc procedure
+          JOIN pg_catalog.pg_namespace procedure_namespace
+            ON procedure_namespace.oid = procedure.pronamespace
+          WHERE procedure_namespace.nspname = $1
+            AND procedure.proowner <> runtime_role.oid
+        ) AS unowned_function_count,
+        (
+          SELECT count(*)
+          FROM pg_catalog.pg_type type_record
+          JOIN pg_catalog.pg_namespace type_namespace
+            ON type_namespace.oid = type_record.typnamespace
+          WHERE type_namespace.nspname = $1
+            AND type_record.typowner <> runtime_role.oid
+        ) AS unowned_type_count
+      FROM pg_catalog.pg_namespace namespace
+      JOIN pg_catalog.pg_database database
+        ON database.datname = pg_catalog.current_database()
+      JOIN pg_catalog.pg_roles runtime_role
+        ON runtime_role.rolname = current_user
+      JOIN pg_catalog.pg_roles database_owner_role
+        ON database_owner_role.rolname = 'pg_database_owner'
+      WHERE namespace.nspname = $1
+    `,
+    [schema],
+  );
+  const trust = rows[0];
+  if (!trust || trust.runtime_owns_schema !== true) {
+    throw new Error("core-repair target schema is not owned by the effective operator role");
+  }
+  if (trust.unexpected_create_grant === true) {
+    throw new Error("core-repair target schema grants CREATE to an unreviewed role");
+  }
+  if (
+    trust.unexpected_relation_grant === true ||
+    trust.unexpected_column_grant === true ||
+    trust.unexpected_function_grant === true
+  ) {
+    throw new Error("core-repair target objects grant privileges to an unreviewed role");
+  }
+  if (
+    Number(trust.unowned_relation_count) !== 0 ||
+    Number(trust.unowned_function_count) !== 0 ||
+    Number(trust.unowned_type_count) !== 0
+  ) {
+    throw new Error("core-repair target schema contains objects owned by an unreviewed role");
+  }
+}
+
 async function assertObservedDiscontinuity(
   transaction: StewardCoreRepairExecutor,
   schema: StewardCoreRepairSchema,
@@ -652,8 +785,9 @@ async function applyInTransaction(
   // miss rows committed while waiting on an in-flight writer.
   await lockBaselineTables(transaction, expectedSchema);
   const schema = await resolveTargetSchema(transaction, expectedSchema);
+  await assertTrustedRepairSchema(transaction, schema);
   const quotedSchema = quoteStewardCoreRepairIdentifier(schema);
-  await transaction.unsafe(`SET LOCAL search_path TO ${quotedSchema}, public, pg_catalog`);
+  await transaction.unsafe(`SET LOCAL search_path TO ${quotedSchema}`);
 
   const manifest = getSchemaManifest(schema);
   await assertCatalogPostgresMajor(transaction, manifest);
@@ -714,8 +848,9 @@ async function inspectInTransaction(
   await transaction.unsafe("SET LOCAL idle_in_transaction_session_timeout = '5min'");
 
   const schema = await resolveTargetSchema(transaction, expectedSchema);
+  await assertTrustedRepairSchema(transaction, schema);
   const quotedSchema = quoteStewardCoreRepairIdentifier(schema);
-  await transaction.unsafe(`SET LOCAL search_path TO ${quotedSchema}, public, pg_catalog`);
+  await transaction.unsafe(`SET LOCAL search_path TO ${quotedSchema}`);
   const manifest = getSchemaManifest(schema);
   await assertCatalogPostgresMajor(transaction, manifest);
   const sources = loadStewardCoreRepairSources(schema);
@@ -760,8 +895,9 @@ async function inspectAppliedInTransaction(
   await transaction.unsafe("SET LOCAL idle_in_transaction_session_timeout = '2s'");
 
   const schema = await resolveTargetSchema(transaction, expectedSchema);
+  await assertTrustedRepairSchema(transaction, schema);
   const quotedSchema = quoteStewardCoreRepairIdentifier(schema);
-  await transaction.unsafe(`SET LOCAL search_path TO ${quotedSchema}, public, pg_catalog`);
+  await transaction.unsafe(`SET LOCAL search_path TO ${quotedSchema}`);
   const manifest = getSchemaManifest(schema);
   await assertCatalogPostgresMajor(transaction, manifest);
   const sources = loadStewardCoreRepairSources(schema);

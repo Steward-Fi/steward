@@ -8,15 +8,40 @@ import {
   getStewardSchemaMigrationExpectation,
   getStewardSchemaMigrationExpectations,
   getStewardSchemaMigrationSource,
-  inspectStewardSchemaMigrations,
+  type InspectStewardSchemaMigrationsOptions,
+  inspectStewardSchemaMigrations as inspectStewardSchemaMigrationsRaw,
+  type RunStewardSchemaMigrationsOptions,
   renderStewardSchemaMigration,
-  runStewardSchemaMigrations,
+  runStewardSchemaMigrations as runStewardSchemaMigrationsRaw,
   STEWARD_SCHEMA_MIGRATIONS_TABLE,
   type StewardSchemaMigrationClient,
   type StewardSchemaMigrationExecutor,
+  type StewardSchemaMigrationSchema,
 } from "../steward-schema-migrations";
 
 setDefaultTimeout(180_000);
+
+type TestRunOptions = Omit<RunStewardSchemaMigrationsOptions, "expectedSchema"> & {
+  expectedSchema?: StewardSchemaMigrationSchema;
+};
+
+type TestInspectOptions = Omit<InspectStewardSchemaMigrationsOptions, "expectedSchema"> & {
+  expectedSchema?: StewardSchemaMigrationSchema;
+};
+
+function runStewardSchemaMigrations(options: TestRunOptions) {
+  return runStewardSchemaMigrationsRaw({
+    ...options,
+    expectedSchema: options.expectedSchema ?? "public",
+  });
+}
+
+function inspectStewardSchemaMigrations(options: TestInspectOptions) {
+  return inspectStewardSchemaMigrationsRaw({
+    ...options,
+    expectedSchema: options.expectedSchema ?? "public",
+  });
+}
 
 const fixtureTables = `
   CREATE TABLE tenants (
@@ -398,6 +423,7 @@ describe("Steward-owned schema compatibility migration", () => {
         await createFixture(adapter, schema);
         const first = await runStewardSchemaMigrations({
           client: adapter,
+          expectedSchema: schema,
           useAdvisoryLock: false,
         });
         expect(first).toEqual({
@@ -406,7 +432,10 @@ describe("Steward-owned schema compatibility migration", () => {
         });
         await assertInstalled(adapter, schema);
 
-        const inspection = await inspectStewardSchemaMigrations({ client: adapter });
+        const inspection = await inspectStewardSchemaMigrations({
+          client: adapter,
+          expectedSchema: schema,
+        });
         expect(inspection).toEqual({
           status: "ready",
           schema,
@@ -419,6 +448,7 @@ describe("Steward-owned schema compatibility migration", () => {
 
         const second = await runStewardSchemaMigrations({
           client: adapter,
+          expectedSchema: schema,
           useAdvisoryLock: false,
         });
         expect(second).toEqual({ applied: [], schema });
@@ -476,6 +506,83 @@ describe("Steward-owned schema compatibility migration", () => {
 
       await expect(inspectStewardSchemaMigrations({ client: adapter })).rejects.toThrow(
         /auth_tenant_config_subject.*ACL/,
+      );
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("readiness rejects an unexpected bootstrap routine", async () => {
+    const client = new PGlite("memory://");
+    const adapter = pgliteAdapter(client);
+    try {
+      await createFixture(adapter, "public");
+      await runStewardSchemaMigrations({ client: adapter, useAdvisoryLock: false });
+      await adapter.unsafe(`
+        CREATE FUNCTION steward_bootstrap.unreviewed_release_helper()
+        RETURNS boolean
+        LANGUAGE sql
+        STABLE
+        SECURITY DEFINER
+        SET search_path = pg_catalog
+        AS $$ SELECT true $$;
+        REVOKE ALL ON FUNCTION steward_bootstrap.unreviewed_release_helper() FROM PUBLIC;
+      `);
+
+      await expect(inspectStewardSchemaMigrations({ client: adapter })).rejects.toThrow(
+        "bootstrap function catalog contains unexpected routines",
+      );
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("readiness rejects PUBLIC access to the owner-bound bootstrap schema", async () => {
+    const client = new PGlite("memory://");
+    const adapter = pgliteAdapter(client);
+    try {
+      await createFixture(adapter, "public");
+      await runStewardSchemaMigrations({ client: adapter, useAdvisoryLock: false });
+      await adapter.unsafe("GRANT USAGE ON SCHEMA steward_bootstrap TO PUBLIC");
+
+      await expect(inspectStewardSchemaMigrations({ client: adapter })).rejects.toThrow(/ACL/);
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("readiness rejects an unreviewed third-party function grant", async () => {
+    const client = new PGlite("memory://");
+    const adapter = pgliteAdapter(client);
+    try {
+      await createFixture(adapter, "public");
+      await runStewardSchemaMigrations({ client: adapter, useAdvisoryLock: false });
+      await adapter.unsafe(`
+        CREATE ROLE steward_unreviewed_reader;
+        GRANT EXECUTE ON FUNCTION steward_bootstrap.auth_tenant_config_subject(text)
+          TO steward_unreviewed_reader;
+      `);
+
+      await expect(inspectStewardSchemaMigrations({ client: adapter })).rejects.toThrow(
+        /auth_tenant_config_subject.*ACL/,
+      );
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("readiness rejects PUBLIC execution of the release manifest", async () => {
+    const client = new PGlite("memory://");
+    const adapter = pgliteAdapter(client);
+    try {
+      await createFixture(adapter, "public");
+      await runStewardSchemaMigrations({ client: adapter, useAdvisoryLock: false });
+      await adapter.unsafe(
+        "GRANT EXECUTE ON FUNCTION steward_bootstrap.release_migration_manifest() TO PUBLIC",
+      );
+
+      await expect(inspectStewardSchemaMigrations({ client: adapter })).rejects.toThrow(
+        /status function does not match/,
       );
     } finally {
       await client.close();
@@ -661,7 +768,11 @@ describe("Steward-owned schema compatibility migration", () => {
     try {
       await adapter.unsafe("CREATE TABLE public.authenticators (id uuid PRIMARY KEY)");
       await createFixture(adapter, "steward");
-      await runStewardSchemaMigrations({ client: adapter, useAdvisoryLock: false });
+      await runStewardSchemaMigrations({
+        client: adapter,
+        expectedSchema: "steward",
+        useAdvisoryLock: false,
+      });
       await assertInstalled(adapter, "steward");
       const publicRpColumn = await adapter.unsafe<{ column_name: string }>(`
         SELECT column_name
@@ -774,6 +885,53 @@ describe("Steward-owned schema compatibility migration", () => {
       await client.close();
     }
   });
+
+  test("fails before mutation when current_schema does not match the pinned target", async () => {
+    const client = new PGlite("memory://");
+    const adapter = pgliteAdapter(client);
+    try {
+      await createFixture(adapter, "steward");
+      await expect(
+        runStewardSchemaMigrations({
+          client: adapter,
+          expectedSchema: "public",
+          useAdvisoryLock: false,
+        }),
+      ).rejects.toThrow("search_path resolves to steward, expected Steward schema public");
+      const marker = await adapter.unsafe<{ relation: string | null }>(
+        `SELECT to_regclass('steward.${STEWARD_SCHEMA_MIGRATIONS_TABLE}')::text AS relation`,
+      );
+      expect(marker).toEqual([{ relation: null }]);
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("uses a transaction-scoped advisory lock and fails closed on contention", async () => {
+    const queries: string[] = [];
+    const executor: StewardSchemaMigrationExecutor = {
+      async unsafe<T extends Record<string, unknown>>(query: string) {
+        queries.push(query);
+        if (query.includes("pg_try_advisory_xact_lock")) {
+          return [{ acquired: false }] as T[];
+        }
+        throw new Error("migration continued after advisory lock contention");
+      },
+    };
+    const client: StewardSchemaMigrationClient = {
+      ...executor,
+      async begin<T>(callback: (transaction: StewardSchemaMigrationExecutor) => Promise<T>) {
+        return callback(executor);
+      },
+    };
+
+    await expect(
+      runStewardSchemaMigrationsRaw({ client, expectedSchema: "public" }),
+    ).rejects.toThrow("another Steward schema migration already holds the advisory lock");
+    expect(queries).toHaveLength(1);
+    expect(queries[0]).toContain("pg_try_advisory_xact_lock");
+    expect(queries[0]).not.toContain("pg_advisory_lock(");
+  });
 });
 
 const postgresUrl = process.env.DATABASE_URL;
@@ -859,14 +1017,20 @@ postgresDescribe("Steward-owned schema compatibility migration on real Postgres"
         }
 
         await expect(
-          runStewardSchemaMigrations({ client: adapter, useAdvisoryLock: true }),
+          runStewardSchemaMigrations({
+            client: adapter,
+            expectedSchema: schema,
+            useAdvisoryLock: true,
+          }),
         ).resolves.toEqual({
           applied: getStewardSchemaMigrationExpectations().map(({ tag }) => tag),
           schema,
         });
         await assertInstalled(adapter, schema, true);
 
-        await expect(inspectStewardSchemaMigrations({ client: adapter })).resolves.toEqual({
+        await expect(
+          inspectStewardSchemaMigrations({ client: adapter, expectedSchema: schema }),
+        ).resolves.toEqual({
           status: "ready",
           schema,
           expectedCount: 2,
@@ -875,6 +1039,19 @@ postgresDescribe("Steward-owned schema compatibility migration on real Postgres"
           expectedTip: "0001_passkey_rp_provenance_0114",
           rpProvenance: true,
         });
+
+        const splitRuntimeRole = `steward_split_runtime_${randomUUID().replaceAll("-", "")}`;
+        postgresRoles.push(splitRuntimeRole);
+        await admin.unsafe(`CREATE ROLE "${splitRuntimeRole}"`);
+        await client.unsafe(`GRANT USAGE ON SCHEMA "${schema}" TO "${splitRuntimeRole}"`);
+        await client.unsafe(`SET ROLE "${splitRuntimeRole}"`);
+        try {
+          await expect(
+            inspectStewardSchemaMigrations({ client: adapter, expectedSchema: schema }),
+          ).rejects.toThrow(/owner or an explicit member of the owner role/);
+        } finally {
+          await client.unsafe("RESET ROLE");
+        }
 
         const sharedRows = await client<
           { hash: string; created_at: string | number }[]
@@ -891,15 +1068,19 @@ postgresDescribe("Steward-owned schema compatibility migration on real Postgres"
              true
            )`,
         );
-        await expect(inspectStewardSchemaMigrations({ client: adapter })).rejects.toThrow(
-          /behind the required release/,
-        );
+        await expect(
+          inspectStewardSchemaMigrations({ client: adapter, expectedSchema: schema }),
+        ).rejects.toThrow(/behind the required release/);
 
-        await runStewardSchemaMigrations({ client: adapter, useAdvisoryLock: false });
+        await runStewardSchemaMigrations({
+          client: adapter,
+          expectedSchema: schema,
+          useAdvisoryLock: false,
+        });
         await client.unsafe(`ALTER TABLE "${schema}".authenticators DROP COLUMN rp_id`);
-        await expect(inspectStewardSchemaMigrations({ client: adapter })).rejects.toThrow(
-          /authenticators\.rp_id/,
-        );
+        await expect(
+          inspectStewardSchemaMigrations({ client: adapter, expectedSchema: schema }),
+        ).rejects.toThrow(/authenticators\.rp_id/);
 
         const sharedRowsAfterReadiness = await client<
           { hash: string; created_at: string | number }[]
@@ -920,9 +1101,12 @@ postgresDescribe("Steward-owned schema compatibility migration on real Postgres"
         await client.unsafe(
           `ALTER FUNCTION steward_bootstrap.auth_tenant_config_subject(text) OWNER TO "${quotedOwner}"`,
         );
-        await expect(inspectStewardSchemaMigrations({ client: adapter })).rejects.toThrow(
-          /auth_tenant_config_subject.*ACL/,
+        await client.unsafe(
+          "REVOKE ALL ON FUNCTION steward_bootstrap.auth_tenant_config_subject(text) FROM PUBLIC",
         );
+        await expect(
+          inspectStewardSchemaMigrations({ client: adapter, expectedSchema: schema }),
+        ).rejects.toThrow(/auth_tenant_config_subject.*owner/);
       } finally {
         await client.end({ timeout: 5 });
       }

@@ -270,8 +270,10 @@ export BASE="https://steward.elizacloud.ai"  # or your Railway URL
 curl -sf "$BASE/health"
 # → {"status":"ok","version":"<current API version>","uptime":...}
 
-# Deep readiness check (verifies DB + migrations + vault)
-curl -sf "$BASE/ready"
+# Deep readiness check (verifies DB + migrations + vault). Production release
+# acceptance requires the operator header; do not print the verbose body in CI.
+curl -sf "$BASE/ready" \
+  -H "X-Steward-Probe-Token: $STEWARD_READY_PROBE_TOKEN"
 # → {"status":"ready","version":"<current API version>","uptime":...,"checks":{"migrations":{"ok":true},"database":{"ok":true},...}}
 # Set STEWARD_READY_PROBE_TOKEN and send X-Steward-Probe-Token only from an
 # operator probe when the full diagnostic details are required.
@@ -382,8 +384,21 @@ railway up --environment staging
 
 For production, dispatch **Deploy Railway (Production)** with a full commit SHA
 already on `main`. The workflow requires an exact successful main Docker build,
-resolves its manifest digest, and passes only that digest to Railway. See the
+resolves its manifest digest, and passes only that digest to Railway. It also
+sets and verifies Railway's effective `healthcheckPath=/health` and
+`overlapSeconds=0`, polls only the new deployment ID returned by Railway,
+verifies that deployment's image/digest metadata, and requires authenticated
+`/ready` using the protected GitHub `STEWARD_READY_PROBE_TOKEN` secret. A public
+`/health` response alone is never production release evidence because the
+previous instance could answer it. See the
 [production promotion and rollback runbook](runbooks/production-promotion.md).
+Before mutating Railway, the script reads the effective rendered variables for
+the exact Railway project/service/environment and verifies in-process that its
+`STEWARD_READY_PROBE_TOKEN` exactly matches the protected GitHub secret. It
+never prints the variables response or either token. This control-plane check
+is compatible with a pinned rollback image that predates authenticated verbose
+`/ready`; the newly deployed candidate must still pass the strict authenticated
+`/ready` gate after cutover.
 
 ### Rollback
 
@@ -492,6 +507,7 @@ curl -sf "$BASE/platform/tenants" \
 | `STEWARD_JWT_SECRET` | **Yes** | — | Canonical server-side signing and verification secret for user, session, and agent JWTs. Must be at least 32 characters in production. |
 | `STEWARD_SESSION_SECRET` | No | — | Deprecated compatibility fallback. Rename existing deployments to `STEWARD_JWT_SECRET`. |
 | `STEWARD_PLATFORM_KEYS` | **Yes** | — | Platform admin key(s), comma-separated |
+| `STEWARD_READY_PROBE_TOKEN` | **Yes for production release acceptance** | — | Dedicated operator token for verbose `/ready` diagnostics. Store the matching value in the protected GitHub `Production` environment; send only as `X-Steward-Probe-Token`. |
 | `STEWARD_PLATFORM_KEY_SCOPES` | **Yes for platform routes** | — | JSON map from a raw platform key (or its SHA-256 hex digest) to explicit scopes. Unmapped keys authenticate but have no authorization. |
 | `STEWARD_EMAIL_CODE_SECRET` | **Yes for email auth** | — | Separate secret binding email codes and polling receipts; at least 32 characters in production. |
 | `STEWARD_AUDIT_HMAC_KEY` | **Yes in production** | — | Separate HMAC root for the tenant audit chain. |

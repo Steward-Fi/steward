@@ -45,15 +45,11 @@ export interface StewardSchemaMigrationExecutor {
   ): Promise<T[]>;
 }
 
-export interface StewardSchemaMigrationReservedClient extends StewardSchemaMigrationExecutor {
-  release(): void;
-}
-
 export interface StewardSchemaMigrationClient extends StewardSchemaMigrationExecutor {
   begin<T>(callback: (transaction: StewardSchemaMigrationExecutor) => Promise<T>): Promise<T>;
-  reserve?(): Promise<StewardSchemaMigrationReservedClient>;
-  end?(options?: { timeout?: number }): Promise<void>;
 }
+
+export type StewardSchemaMigrationSchema = "public" | "steward";
 
 export type StewardSchemaMigrationExpectation = {
   tag: string;
@@ -63,11 +59,13 @@ export type StewardSchemaMigrationExpectation = {
 };
 
 export type RunStewardSchemaMigrationsOptions = {
+  expectedSchema: StewardSchemaMigrationSchema;
   client?: StewardSchemaMigrationClient;
   useAdvisoryLock?: boolean;
 };
 
 export type InspectStewardSchemaMigrationsOptions = {
+  expectedSchema: StewardSchemaMigrationSchema;
   client?: StewardSchemaMigrationClient;
 };
 
@@ -192,77 +190,38 @@ function assertSafeDataSchema(schema: string): void {
   }
 }
 
-async function resolveDataSchema(transaction: StewardSchemaMigrationExecutor): Promise<string> {
-  const rows = await transaction.unsafe<{ schema_name: string | null }>(
-    "SELECT pg_catalog.current_schema()::text AS schema_name",
-  );
+async function resolveDataSchema(
+  transaction: StewardSchemaMigrationExecutor,
+  expectedSchema: StewardSchemaMigrationSchema,
+): Promise<StewardSchemaMigrationSchema> {
+  const rows = await transaction.unsafe<{
+    schema_name: string | null;
+    schema_owner: string | null;
+    runtime_role: string;
+    runtime_owns_schema: boolean;
+  }>(`
+    SELECT
+      namespace.nspname::text AS schema_name,
+      pg_catalog.pg_get_userbyid(namespace.nspowner)::text AS schema_owner,
+      current_user::text AS runtime_role,
+      pg_catalog.pg_has_role(current_user, namespace.nspowner, 'USAGE') AS runtime_owns_schema
+    FROM pg_catalog.pg_namespace namespace
+    WHERE namespace.nspname = pg_catalog.current_schema()
+  `);
   const schema = rows[0]?.schema_name;
   if (!schema) throw new Error("DATABASE_URL search_path resolves to no writable data schema");
   assertSafeDataSchema(schema);
-  return schema;
-}
-
-type CapturedOutcome<T> = { ok: true; value: T } | { ok: false; error: unknown };
-
-class ReservedTransactionCleanupError extends AggregateError {}
-
-async function captureOutcome<T>(operation: () => Promise<T>): Promise<CapturedOutcome<T>> {
-  try {
-    return { ok: true, value: await operation() };
-  } catch (error) {
-    return { ok: false, error };
-  }
-}
-
-async function runReservedTransaction<T>(
-  connection: StewardSchemaMigrationExecutor,
-  operation: (transaction: StewardSchemaMigrationExecutor) => Promise<T>,
-): Promise<T> {
-  const begin = await captureOutcome(async () => {
-    await connection.unsafe("BEGIN");
-  });
-  if (!begin.ok) {
-    const rollback = await captureOutcome(async () => {
-      await connection.unsafe("ROLLBACK");
-    });
-    if (!rollback.ok) {
-      throw new ReservedTransactionCleanupError(
-        [begin.error, rollback.error],
-        "schema-migration transaction start was uncertain and could not be rolled back",
-      );
-    }
-    throw begin.error;
-  }
-
-  const result = await captureOutcome(() => operation(connection));
-  if (result.ok) {
-    const commit = await captureOutcome(async () => {
-      await connection.unsafe("COMMIT");
-    });
-    if (commit.ok) return result.value;
-
-    const rollback = await captureOutcome(async () => {
-      await connection.unsafe("ROLLBACK");
-    });
-    if (!rollback.ok) {
-      throw new ReservedTransactionCleanupError(
-        [commit.error, rollback.error],
-        "schema-migration commit failed and its reserved transaction could not be rolled back",
-      );
-    }
-    throw commit.error;
-  }
-
-  const rollback = await captureOutcome(async () => {
-    await connection.unsafe("ROLLBACK");
-  });
-  if (!rollback.ok) {
-    throw new ReservedTransactionCleanupError(
-      [result.error, rollback.error],
-      "schema migration failed and its reserved transaction could not be rolled back",
+  if (schema !== expectedSchema) {
+    throw new Error(
+      `DATABASE_URL search_path resolves to ${schema}, expected Steward schema ${expectedSchema}`,
     );
   }
-  throw result.error;
+  if (rows[0]?.runtime_owns_schema !== true) {
+    throw new Error(
+      `Steward schema ${schema} must be inspected and migrated by its owner or an explicit member of the owner role`,
+    );
+  }
+  return schema;
 }
 
 async function assertBootstrapRelations(
@@ -342,12 +301,18 @@ type BootstrapFunctionCatalogRow = {
   identity_arguments: string;
   function_arguments: string;
   result_type: string;
+  owner_name: string;
+  runtime_role: string;
   language_name: string;
   volatility: string;
   security_definer: boolean;
   configuration: string;
   source: string;
   public_execute: boolean;
+  unexpected_execute_grant: boolean;
+  bootstrap_schema_owner: string;
+  public_schema_usage: boolean;
+  unexpected_schema_grant: boolean;
 };
 
 type ExpectedBootstrapFunction = {
@@ -432,6 +397,8 @@ async function assertBootstrapFunctionCatalog(
       pg_catalog.pg_get_function_identity_arguments(procedure.oid) AS identity_arguments,
       pg_catalog.pg_get_function_arguments(procedure.oid) AS function_arguments,
       pg_catalog.pg_get_function_result(procedure.oid) AS result_type,
+      pg_catalog.pg_get_userbyid(procedure.proowner)::text AS owner_name,
+      current_user::text AS runtime_role,
       language.lanname AS language_name,
       procedure.provolatile::text AS volatility,
       procedure.prosecdef AS security_definer,
@@ -444,7 +411,31 @@ async function assertBootstrapFunctionCatalog(
         ) AS function_acl
         WHERE function_acl.grantee = 0
           AND function_acl.privilege_type = 'EXECUTE'
-      ) AS public_execute
+      ) AS public_execute,
+      EXISTS (
+        SELECT 1
+        FROM pg_catalog.aclexplode(
+          COALESCE(procedure.proacl, pg_catalog.acldefault('f', procedure.proowner))
+        ) AS function_acl
+        WHERE function_acl.grantee NOT IN (0, procedure.proowner)
+          AND function_acl.privilege_type = 'EXECUTE'
+      ) AS unexpected_execute_grant,
+      pg_catalog.pg_get_userbyid(namespace.nspowner)::text AS bootstrap_schema_owner,
+      EXISTS (
+        SELECT 1
+        FROM pg_catalog.aclexplode(
+          COALESCE(namespace.nspacl, pg_catalog.acldefault('n', namespace.nspowner))
+        ) AS schema_acl
+        WHERE schema_acl.grantee = 0
+          AND schema_acl.privilege_type = 'USAGE'
+      ) AS public_schema_usage,
+      EXISTS (
+        SELECT 1
+        FROM pg_catalog.aclexplode(
+          COALESCE(namespace.nspacl, pg_catalog.acldefault('n', namespace.nspowner))
+        ) AS schema_acl
+        WHERE schema_acl.grantee NOT IN (0, namespace.nspowner)
+      ) AS unexpected_schema_grant
     FROM pg_catalog.pg_proc procedure
     JOIN pg_catalog.pg_namespace namespace ON namespace.oid = procedure.pronamespace
     JOIN pg_catalog.pg_language language ON language.oid = procedure.prolang
@@ -452,6 +443,10 @@ async function assertBootstrapFunctionCatalog(
     ORDER BY procedure.proname, procedure.oid
   `);
   const expected = getExpectedBootstrapFunctions(schema);
+  const allowedNames = new Set([...expected.keys(), "release_migration_manifest"]);
+  if (rows.some((row) => !allowedNames.has(row.function_name))) {
+    throw new Error("Steward bootstrap function catalog contains unexpected routines");
+  }
   for (const [name, functionExpectation] of expected) {
     const matches = rows.filter((row) => row.function_name === name);
     const actual = matches[0];
@@ -478,7 +473,14 @@ async function assertBootstrapFunctionCatalog(
                         ? "source"
                         : actual.public_execute
                           ? "ACL"
-                          : undefined;
+                          : actual.owner_name !== actual.runtime_role ||
+                              actual.bootstrap_schema_owner !== actual.runtime_role
+                            ? "owner"
+                            : actual.unexpected_execute_grant ||
+                                actual.public_schema_usage ||
+                                actual.unexpected_schema_grant
+                              ? "ACL"
+                              : undefined;
     if (mismatch) {
       const resultDetail =
         mismatch === "result" && actual
@@ -502,6 +504,12 @@ async function assertBootstrapFunctionCatalog(
     status.volatility !== "s" ||
     status.security_definer !== true ||
     status.configuration !== "search_path=pg_catalog" ||
+    status.public_execute !== false ||
+    status.owner_name !== status.runtime_role ||
+    status.bootstrap_schema_owner !== status.runtime_role ||
+    status.unexpected_execute_grant !== false ||
+    status.public_schema_usage !== false ||
+    status.unexpected_schema_grant !== false ||
     normalizeFunctionSource(status.source) !==
       normalizeFunctionSource(releaseMigrationManifestBody(schema))
   ) {
@@ -567,16 +575,28 @@ async function installStatusFunction(
     AS $$
       ${releaseMigrationManifestBody(schema)}
     $$;
-    GRANT EXECUTE ON FUNCTION "steward_bootstrap"."release_migration_manifest"() TO PUBLIC;
+    REVOKE ALL ON SCHEMA "steward_bootstrap" FROM PUBLIC;
+    REVOKE ALL ON ALL FUNCTIONS IN SCHEMA "steward_bootstrap" FROM PUBLIC;
     COMMENT ON FUNCTION "steward_bootstrap"."release_migration_manifest"() IS
-      'Read-only Steward-owned release migration manifest for readiness checks.';
+      'Owner-bound read-only Steward release migration manifest for readiness checks.';
   `);
 }
 
 async function applyInTransaction(
   transaction: StewardSchemaMigrationExecutor,
+  expectedSchema: StewardSchemaMigrationSchema,
+  useAdvisoryLock: boolean,
 ): Promise<{ applied: string[]; schema: string }> {
-  const schema = await resolveDataSchema(transaction);
+  if (useAdvisoryLock) {
+    const lock = await transaction.unsafe<{ acquired: boolean }>(
+      "SELECT pg_catalog.pg_try_advisory_xact_lock(pg_catalog.hashtextextended($1, 0)) AS acquired",
+      [ADVISORY_LOCK_KEY],
+    );
+    if (lock[0]?.acquired !== true) {
+      throw new Error("another Steward schema migration already holds the advisory lock");
+    }
+  }
+  const schema = await resolveDataSchema(transaction, expectedSchema);
   await assertBootstrapRelations(transaction, schema);
 
   const quotedSchema = quoteIdentifier(schema);
@@ -638,12 +658,13 @@ async function applyInTransaction(
 
 async function inspectInTransaction(
   transaction: StewardSchemaMigrationExecutor,
+  expectedSchema: StewardSchemaMigrationSchema,
 ): Promise<StewardSchemaMigrationInspection> {
   await transaction.unsafe("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
   await transaction.unsafe("SET LOCAL statement_timeout = '2s'");
   await transaction.unsafe("SET LOCAL idle_in_transaction_session_timeout = '2s'");
 
-  const schema = await resolveDataSchema(transaction);
+  const schema = await resolveDataSchema(transaction, expectedSchema);
   await assertBootstrapRelations(transaction, schema);
   await assertBootstrapFunctionCatalog(transaction, schema);
   const rows = await transaction.unsafe<AppliedMarker>(
@@ -676,19 +697,22 @@ async function inspectInTransaction(
 
 /**
  * Verify the schema-owned auth compatibility surface without consulting the
- * shared Drizzle ledger. The SECURITY DEFINER status function is installed by
- * the operator migration so a least-privileged runtime role can read the exact
- * append-only marker chain; the physical RP-provenance column and bootstrap
- * relation prerequisites are checked independently in the same snapshot.
+ * shared Drizzle ledger. The SECURITY DEFINER status function is installed for
+ * the owner-bound runtime role to read the exact append-only marker chain; the
+ * physical RP-provenance column and bootstrap relation prerequisites are
+ * checked independently in the same snapshot. Split app/migrator roles are
+ * deliberately rejected until their complete grants are a reviewed contract.
  */
 export async function inspectStewardSchemaMigrations(
-  options: InspectStewardSchemaMigrationsOptions = {},
+  options: InspectStewardSchemaMigrationsOptions,
 ): Promise<StewardSchemaMigrationInspection> {
   const ownsClient = !options.client;
   const client =
     options.client ?? (createPostgresClient() as unknown as StewardSchemaMigrationClient);
   try {
-    return await client.begin((transaction) => inspectInTransaction(transaction));
+    return await client.begin((transaction) =>
+      inspectInTransaction(transaction, options.expectedSchema),
+    );
   } finally {
     if (ownsClient) {
       await (client as unknown as { end(options?: { timeout?: number }): Promise<void> }).end({
@@ -700,110 +724,30 @@ export async function inspectStewardSchemaMigrations(
 
 /**
  * Install the #900 bootstrap function surface and #914 passkey RP provenance
- * against the first schema in the DATABASE_URL search_path. This explicit
- * operator migration never reads or writes drizzle.__drizzle_migrations; its
- * sole provenance is the schema-local __steward_release_migrations ledger.
+ * against the explicitly pinned first schema in the DATABASE_URL search_path.
+ * This operator migration never reads or writes drizzle.__drizzle_migrations;
+ * its sole provenance is the schema-local __steward_release_migrations ledger.
  * The marker covers only this additive compatibility layer. A release must
  * separately prove the target schema's exact core-migration baseline before
  * enabling it in production readiness.
  */
 export async function runStewardSchemaMigrations(
-  options: RunStewardSchemaMigrationsOptions = {},
+  options: RunStewardSchemaMigrationsOptions,
 ): Promise<{ applied: string[]; schema: string }> {
   const ownsClient = !options.client;
   const client =
     options.client ?? (createPostgresClient() as unknown as StewardSchemaMigrationClient);
   const useAdvisoryLock = options.useAdvisoryLock ?? true;
-  let reserved: StewardSchemaMigrationReservedClient | undefined;
-  let clientClosed = false;
-
-  const closeClient = async (timeout: number): Promise<void> => {
-    if (!client.end) throw new Error("schema-migration database client cannot be closed");
-    await client.end({ timeout });
-  };
-
-  const quarantineReservedClient = async (errors: unknown[], message: string): Promise<void> => {
-    reserved = undefined;
-    clientClosed = true;
-    const close = await captureOutcome(() => closeClient(0));
-    if (!close.ok) throw new AggregateError([...errors, close.error], message);
-  };
 
   try {
-    if (useAdvisoryLock) {
-      if (!client.reserve) {
-        throw new Error("schema-migration advisory lock requires a reserved database connection");
-      }
-      const connection = await client.reserve();
-      reserved = connection;
-      const acquisition = await captureOutcome(() =>
-        connection.unsafe<{ acquired: boolean }>(
-          "SELECT pg_catalog.pg_try_advisory_lock(pg_catalog.hashtextextended($1, 0)) AS acquired",
-          [ADVISORY_LOCK_KEY],
-        ),
-      );
-      if (!acquisition.ok) {
-        await quarantineReservedClient(
-          [acquisition.error],
-          "schema-migration advisory-lock acquisition was uncertain and its client could not be quarantined",
-        );
-        throw acquisition.error;
-      }
-      if (acquisition.value[0]?.acquired === false) {
-        throw new Error("another Steward schema migration already holds the advisory lock");
-      }
-      if (acquisition.value[0]?.acquired !== true) {
-        const error = new Error(
-          "schema-migration advisory-lock acquisition returned an invalid result",
-        );
-        await quarantineReservedClient(
-          [error],
-          "schema-migration advisory-lock acquisition was uncertain and its client could not be quarantined",
-        );
-        throw error;
-      }
-
-      const migration = await captureOutcome(() =>
-        runReservedTransaction(connection, applyInTransaction),
-      );
-      const unlock = await captureOutcome(async () => {
-        const rows = await connection.unsafe<{ released: boolean }>(
-          "SELECT pg_catalog.pg_advisory_unlock(pg_catalog.hashtextextended($1, 0)) AS released",
-          [ADVISORY_LOCK_KEY],
-        );
-        if (rows[0]?.released !== true) {
-          throw new Error("schema-migration advisory lock was not held by its reserved connection");
-        }
-      });
-      const cleanupUncertain =
-        !unlock.ok || (!migration.ok && migration.error instanceof ReservedTransactionCleanupError);
-      if (cleanupUncertain) {
-        const errors: unknown[] = [];
-        if (!migration.ok) errors.push(migration.error);
-        if (!unlock.ok) errors.push(unlock.error);
-        await quarantineReservedClient(
-          errors,
-          "schema migration could not prove reserved-session cleanup or quarantine its client",
-        );
-      }
-      if (!unlock.ok) {
-        if (!migration.ok) {
-          throw new AggregateError(
-            [migration.error, unlock.error],
-            "schema migration failed and its reserved advisory lock could not be released",
-          );
-        }
-        throw unlock.error;
-      }
-      if (!migration.ok) throw migration.error;
-      return migration.value;
-    }
-
-    return await client.begin((transaction) => applyInTransaction(transaction));
+    return await client.begin((transaction) =>
+      applyInTransaction(transaction, options.expectedSchema, useAdvisoryLock),
+    );
   } finally {
-    reserved?.release();
-    if (ownsClient && !clientClosed) {
-      await closeClient(5);
+    if (ownsClient) {
+      await (client as unknown as { end(options?: { timeout?: number }): Promise<void> }).end({
+        timeout: 5,
+      });
     }
   }
 }
@@ -811,18 +755,24 @@ export async function runStewardSchemaMigrations(
 const isEntrypoint = process.argv[1] === new URL(import.meta.url).pathname;
 
 if (isEntrypoint) {
-  runStewardSchemaMigrations()
-    .then(({ applied, schema }) => {
-      if (applied.length === 0) {
-        console.log(`[steward-schema-migrate] ${schema} is already up to date.`);
-      } else {
-        console.log(
-          `[steward-schema-migrate] Applied ${applied.join(", ")} to Steward schema ${schema}.`,
-        );
-      }
-    })
-    .catch((error) => {
-      console.error("Failed to run Steward schema migrations", redactedThrownDiagnostics(error));
-      process.exitCode = 1;
-    });
+  const expectedSchema = process.env.STEWARD_CORE_REPAIR_EXPECTED_SCHEMA;
+  if (expectedSchema !== "public" && expectedSchema !== "steward") {
+    console.error("STEWARD_CORE_REPAIR_EXPECTED_SCHEMA is required (public or steward)");
+    process.exitCode = 1;
+  } else {
+    runStewardSchemaMigrations({ expectedSchema })
+      .then(({ applied, schema }) => {
+        if (applied.length === 0) {
+          console.log(`[steward-schema-migrate] ${schema} is already up to date.`);
+        } else {
+          console.log(
+            `[steward-schema-migrate] Applied ${applied.join(", ")} to Steward schema ${schema}.`,
+          );
+        }
+      })
+      .catch((error) => {
+        console.error("Failed to run Steward schema migrations", redactedThrownDiagnostics(error));
+        process.exitCode = 1;
+      });
+  }
 }

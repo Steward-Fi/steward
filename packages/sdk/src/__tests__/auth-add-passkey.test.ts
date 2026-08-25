@@ -128,6 +128,16 @@ function memoryStorage(): SessionStorage {
   };
 }
 
+function authenticatedAuth(): { auth: StewardAuth; token: string } {
+  const storage = memoryStorage();
+  const token = fakeJwt();
+  storage.setItem("steward_session_token", token);
+  return {
+    auth: new StewardAuth({ baseUrl: "https://api.example.test", storage }),
+    token,
+  };
+}
+
 beforeEach(() => {
   captured = [];
   startRegistration.mockClear();
@@ -144,7 +154,7 @@ afterEach(() => {
 
 describe("StewardAuth.addPasskey", () => {
   it("registers a fresh credential by going straight to register/options + verify", async () => {
-    const auth = new StewardAuth({ baseUrl: "https://api.example.test" });
+    const { auth } = authenticatedAuth();
     const result = await auth.addPasskey("shadow@shad0w.xyz");
 
     // It must call register/options first, then register/verify.
@@ -168,7 +178,7 @@ describe("StewardAuth.addPasskey", () => {
   });
 
   it("never calls /auth/passkey/login/options — addPasskey skips the login probe", async () => {
-    const auth = new StewardAuth({ baseUrl: "https://api.example.test" });
+    const { auth } = authenticatedAuth();
     await auth.addPasskey("shadow@shad0w.xyz");
     const paths = captured.map((c) => c.url.replace("https://api.example.test", ""));
     expect(paths).not.toContain("/auth/passkey/login/options");
@@ -182,8 +192,41 @@ describe("StewardAuth.addPasskey", () => {
       }
       return new Response("{}", { status: 200 });
     }) as typeof fetch;
-    const auth = new StewardAuth({ baseUrl: "https://api.example.test" });
+    const { auth } = authenticatedAuth();
     await expect(auth.addPasskey("shadow@shad0w.xyz")).rejects.toBeInstanceOf(StewardApiError);
+  });
+
+  it("authenticates both registration requests with the stored bearer token", async () => {
+    const { auth, token } = authenticatedAuth();
+
+    global.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      expect(new Headers(init?.headers).get("authorization")).toBe(`Bearer ${token}`);
+      if (url.endsWith("/auth/passkey/register/options")) {
+        return new Response(JSON.stringify(REG_OPTIONS), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (url.endsWith("/auth/passkey/register/verify")) {
+        return new Response(JSON.stringify(VERIFY_RESPONSE), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ ok: false, error: "unexpected" }), { status: 500 });
+    }) as typeof fetch;
+
+    await auth.addPasskey("shadow@shad0w.xyz");
+  });
+
+  it("rejects a signed-out registration before making a request when no email grant exists", async () => {
+    const auth = new StewardAuth({ baseUrl: "https://api.example.test" });
+
+    await expect(auth.addPasskey("shadow@shad0w.xyz")).rejects.toThrow(
+      "Not authenticated. Sign in first or provide a verified-email grant.",
+    );
+    expect(captured).toEqual([]);
   });
 
   it("preserves the structured existing-passkey recovery code", async () => {

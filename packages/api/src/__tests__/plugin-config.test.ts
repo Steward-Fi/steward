@@ -14,7 +14,12 @@
  */
 
 import { describe, expect, it } from "bun:test";
-import { KNOWN_PLUGIN_NAMES, resolveEnabledPlugins, UnknownPluginError } from "../plugin-config";
+import {
+  KNOWN_PLUGIN_NAMES,
+  resolveEnabledPlugins,
+  resolveSchemaOwningPlugins,
+  UnknownPluginError,
+} from "../plugin-config";
 
 describe("resolveEnabledPlugins — LEAN (no plugins)", () => {
   it("returns an empty set when STEWARD_PLUGINS is unset", () => {
@@ -136,5 +141,17 @@ describe("KNOWN_PLUGIN_NAMES", () => {
     expect(KNOWN_PLUGIN_NAMES.has("capabilities")).toBe(true);
     expect(KNOWN_PLUGIN_NAMES.has("wxmr")).toBe(true);
     expect([...KNOWN_PLUGIN_NAMES]).toEqual(["trading", "capabilities", "wxmr"]);
+  });
+});
+
+describe("resolveSchemaOwningPlugins", () => {
+  it("identifies capabilities as the only current plugin schema owner", () => {
+    expect(resolveSchemaOwningPlugins(new Set(["trading", "capabilities", "wxmr"]))).toEqual([
+      "capabilities",
+    ]);
+  });
+
+  it("does not classify schema-less plugins as schema owners", () => {
+    expect(resolveSchemaOwningPlugins(new Set(["trading", "wxmr"]))).toEqual([]);
   });
 });

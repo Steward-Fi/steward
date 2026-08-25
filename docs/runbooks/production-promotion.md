@@ -18,10 +18,29 @@ repository through GitHub environment secrets and variables.
 - Configure Railway's platform health check to use `/health`. The repository's
   `railway.json` declares that path for repository-backed services; verify the
   effective service setting when an image-only service does not consume config
-  as code.
+  as code. The production deploy script writes and reads back that setting
+  before triggering the release, then requires it in the exact deployment's
+  metadata. It also pins `overlapSeconds=0` so the later public `/ready` probe
+  cannot be routed to the old deployment after Railway activates the candidate.
+  A public `/health` response is not release evidence because the previous
+  instance could answer it during cutover.
 - Set `PRODUCTION_RAILWAY_HEALTH_URL` to a credential-free public HTTPS root.
   The production workflow fails before its first Railway mutation when this
-  value is absent, and accepts a release only after `/health` succeeds.
+  value is absent.
+- Configure a dedicated `STEWARD_READY_PROBE_TOKEN` on the production Steward
+  service and store the same value as the `STEWARD_READY_PROBE_TOKEN` secret in
+  the protected GitHub `Production` environment. Configure this Railway
+  variable before dispatching the first protected deployment; the deploy itself
+  intentionally does not create or change secrets. Before its first Railway
+  mutation, the script reads the exact project's rendered variables for the
+  selected service/environment and compares the effective value to the GitHub
+  secret in-process. It never prints the variables response or either token and
+  fails closed on an absent value, target mismatch, query failure, or value
+  mismatch. This control-plane bootstrap contract works when the currently
+  pinned rollback image predates authenticated verbose `/ready` support.
+  Production acceptance still requires HTTP 200 from the candidate's
+  authenticated `/ready` plus the full Steward-owned readiness details, so a
+  legacy or public sanitized response cannot satisfy the final gate.
 - Keep production pinned to `repository@sha256:<digest>`. Never repoint it to a
   branch or release tag.
 - A database with the audited 0082-absent/0083-present discontinuity must use
@@ -52,12 +71,28 @@ repository through GitHub environment secrets and variables.
    The workflow fails closed unless the SHA is reachable from `origin/main`,
    an exact-SHA successful `main` Docker run exists, the current manifest's
    provenance names that exact revision and `main`, and the image resolves to a
-   valid `sha256` digest.
+   valid `sha256` digest. The script sets Railway `healthcheckPath=/health` and
+   `overlapSeconds=0`, reads back the effective image and settings, requires a
+   new deployment ID returned by `serviceInstanceDeployV2`, and accepts only
+   that ID with the
+   exact digest and platform health setting in its deployment metadata. It
+   snapshots recent deployment IDs before the mutation and fails if an
+   auto-deploy or concurrent actor creates any additional deployment during
+   the run. It also refuses to start while any baseline deployment is
+   nonterminal, repeats the exact control-plane checks after `/ready`, and
+   requires the tracked ID to be Railway's sole final active deployment.
 7. Approve the protected `Production` environment. Record the commit, resolved
-   digest, Railway deployment ID, and `/health` receipt.
+   digest, exact Railway deployment ID, platform `/health` gate, and
+   authenticated `/ready` receipt.
 
 The `sha-<commit>` tag is used only to find the manifest produced by the exact
 main build. Railway receives the resolved digest, not the tag.
+
+Railway's Deployment API exposes the image and digest but not OCI revision
+labels. Revision proof therefore comes from the registry provenance check; the
+deployment script verifies the exact-revision lookup tag still resolves to the
+same immutable digest before and after reading provenance, then binds Railway's
+exact deployment ID to that digest.
 
 ## Roll back
 
@@ -81,8 +116,27 @@ main build. Railway receives the resolved digest, not the tag.
   rejection is also fatal by default.
 - A container that never passes `/health` is not eligible for Railway cutover
   when the platform health check is configured.
-- A deployment that Railway marks successful still fails acceptance unless the
-  configured public `/health` probe passes.
+- A `SUCCESS` status for any deployment other than the exact ID returned to the
+  workflow is ignored and cannot satisfy acceptance. The accepted deployment's
+  service, environment, image, digest, and embedded `/health` setting must all
+  match.
+- A deployment that Railway marks successful still fails production acceptance
+  unless authenticated `/ready` returns `status: ready` with verbose proof that
+  the operator token was accepted, Steward-owned migration mode, the `steward`
+  schema, and green core-repair plus auth-schema checks. Readiness response
+  bodies are withheld from CI logs because they can contain operator
+  diagnostics.
+- The workflow mutates the service-instance source and healthcheck setting
+  before Railway returns the new deployment ID. A failure after that mutation
+  leaves the GitHub deployment red but does not automatically rewrite Railway
+  configuration or roll back the image: after a forward-only schema repair, an
+  automatic old-image rollback can be unsafe. If the failure occurs before the
+  trigger, the previously active deployment remains live while the configured
+  source may point at the candidate. If it occurs after Railway reports
+  `SUCCESS`, the candidate may already be active. Freeze further mutations,
+  inspect the exact deployment ID in the failure output, and follow the explicit
+  rollback procedure above only after confirming schema compatibility. A red
+  workflow is never a successful release receipt.
 - Failed promotion does not authorize a production configuration mutation or a
   database downgrade. Escalate with the captured diagnostics and keep the last
   known-good digest live.

@@ -35,8 +35,50 @@ describe("production deploy policy", () => {
     expect(railwayConfig.deploy.healthcheckPath).toBe("/health");
     expect(railwayConfig.deploy.healthcheckTimeout).toBeGreaterThanOrEqual(45);
     expect(workflow).toContain('RAILWAY_REQUIRE_HEALTH: "true"');
+    expect(workflow).toContain('RAILWAY_REQUIRE_READY: "true"');
+    expect(workflow).toContain(
+      "RAILWAY_READY_PROBE_TOKEN: ${{ secrets.STEWARD_READY_PROBE_TOKEN }}",
+    );
+    expect(workflow).toContain("RAILWAY_EXPECTED_REVISION: ${{ steps.resolve.outputs.sha }}");
     expect(deployScript).toContain('RAILWAY_REQUIRE_HEALTH:-false}" == "true"');
     expect(deployScript).toContain("RAILWAY_HEALTH_URL is required");
+    expect(deployScript).toContain('healthcheckPath: "/health"');
+    expect(deployScript).toContain('.healthcheckPath == "/health"');
+    expect(deployScript).toContain("overlapSeconds: 0");
+    expect(deployScript).toContain(".overlapSeconds == 0");
+    expect(deployScript).toContain("query ReadyProbeTarget");
+    expect(deployScript).toContain("query ReadyProbeVariables");
+    expect(deployScript).toContain("unrendered: false");
+    expect(deployScript).toContain(".data.variables.STEWARD_READY_PROBE_TOKEN");
+    expect(deployScript).toContain('"$TARGET_READY_PROBE_TOKEN" != "$READY_PROBE_TOKEN"');
+    expect(deployScript).toContain("X-Steward-Probe-Token: ${READY_PROBE_TOKEN}");
+    expect(deployScript).not.toContain("X-Steward-Probe-Purpose: deployment-preflight");
+    expect(deployScript).toContain(
+      "Protected readiness token matches the exact Railway service/environment configuration",
+    );
+    expect(deployScript).toContain('.checks.migrations.detail.mode == "steward-owned"');
+    expect(deployScript).toContain('.checks.migrations.detail.expectedSchema == "steward"');
+    expect(deployScript).toContain('.checks.coreRepair.detail.schema == "steward"');
+    expect(deployScript).toContain('.checks.authSchema.detail.schema == "steward"');
+  });
+
+  test("accepts only the exact Railway deployment id and immutable image identity", () => {
+    expect(deployScript).toContain("serviceInstanceDeployV2");
+    expect(deployScript).toContain(
+      "query TrackedDeployment($id: String!, $input: DeploymentListInput!)",
+    );
+    expect(deployScript).toContain(
+      "query BaselineDeployments($input: DeploymentListInput!, $inflightInput: DeploymentListInput!)",
+    );
+    expect(deployScript).toContain("A pre-existing nonterminal Railway deployment");
+    expect(deployScript).toContain("Detected an untracked deployment");
+    expect(deployScript).toContain("query FinalActiveDeployment");
+    expect(deployScript).toContain("(.activeDeployments | length) == 1");
+    expect(deployScript).toContain(".id == $id and .serviceId == $sid");
+    expect(deployScript).toContain(".meta.image == $img");
+    expect(deployScript).toContain(".meta.imageDigest == $digest");
+    expect(deployScript).toContain('.meta.serviceManifest.deploy.healthcheckPath == "/health"');
+    expect(deployScript).toContain(".meta.serviceManifest.deploy.overlapSeconds == 0");
   });
 
   test("does not create or mark a GitHub Production deployment during dry run", () => {

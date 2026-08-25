@@ -1,8 +1,12 @@
 import { describe, expect, it } from "bun:test";
+import { readFileSync } from "node:fs";
 import type { StewardReleaseReadinessInspection } from "@stwd/db/steward-release-readiness";
+import { PgDialect } from "drizzle-orm/pg-core";
 
 import {
+  assertStewardOwnedPluginMigrationReadiness,
   createStewardReleaseReadinessProbe,
+  ordinaryDrizzleMigrationReadinessQuery,
   resolveStewardMigrationReadinessConfig,
 } from "../services/steward-release-readiness";
 
@@ -69,6 +73,55 @@ describe("Steward production migration readiness configuration", () => {
         STEWARD_CORE_REPAIR_EXPECTED_SCHEMA: "steward",
       }),
     ).toThrow(/must be drizzle or steward-owned/);
+  });
+});
+
+describe("Steward-owned plugin migration readiness", () => {
+  const stewardOwned = {
+    mode: "steward-owned" as const,
+    expectedSchema: "steward" as const,
+  };
+
+  it("preserves ordinary Drizzle behavior for schema-owning plugins", () => {
+    expect(() =>
+      assertStewardOwnedPluginMigrationReadiness({ mode: "drizzle" }, new Set(["capabilities"])),
+    ).not.toThrow();
+  });
+
+  it("allows steward-owned mode when all enabled plugins are schema-less", () => {
+    expect(() =>
+      assertStewardOwnedPluginMigrationReadiness(stewardOwned, new Set(["trading", "wxmr"])),
+    ).not.toThrow();
+  });
+
+  it("fails closed with a clear diagnostic for an unreviewed schema owner", () => {
+    expect(() =>
+      assertStewardOwnedPluginMigrationReadiness(
+        stewardOwned,
+        new Set(["trading", "capabilities"]),
+      ),
+    ).toThrow(
+      /no reviewed migration\/readiness contract.*schema-owning plugin\(s\): capabilities/i,
+    );
+  });
+
+  it("runs the guard before app composition and the listener", () => {
+    const indexSource = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
+    const guardCall = indexSource.indexOf(
+      "assertStewardOwnedPluginMigrationReadiness(migrationReadinessConfig, enabledPlugins);",
+    );
+    expect(guardCall).toBeGreaterThan(-1);
+    expect(guardCall).toBeLessThan(indexSource.indexOf("await composeApp()"));
+    expect(guardCall).toBeLessThan(indexSource.indexOf("Bun.serve(serverOptions)"));
+  });
+});
+
+describe("ordinary Drizzle migration readiness query", () => {
+  it("orders the consumed outer ledger rows by migration id", () => {
+    const query = new PgDialect().sqlToQuery(ordinaryDrizzleMigrationReadinessQuery());
+    expect(query.sql).toMatch(
+      /LEFT JOIN LATERAL \([\s\S]+\) AS migrations ON TRUE\s+ORDER BY migrations\.id ASC\s*$/,
+    );
   });
 });
 

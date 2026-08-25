@@ -1,5 +1,5 @@
 {
-  "proofVersion": 1,
+  "proofVersion": 2,
   "databaseClass": "isolated-production-restore",
   "productionDatabaseTouched": false,
   "targetSchema": "steward",
@@ -33,12 +33,26 @@
     "sessionRefresh": "pending",
     "chatWrite": "pending"
   },
+  "candidatePostRepair": {
+    "health": "pending",
+    "ready": "pending",
+    "providerDiscovery": "pending",
+    "emailSession": "pending",
+    "passkeySession": "pending",
+    "sessionRefresh": "pending",
+    "chatWrite": "pending"
+  },
   "providerExecution": {
     "drainedBeforeRepair": false,
     "legacyResume": "pending",
     "candidateEvidenceResumeAndExecution": "pending",
     "rollbackMode": "pending"
   },
-  "reviewedBy": "",
+  "independentReview": {
+    "reviewedBy": "",
+    "disposition": "pending",
+    "candidateSourceCommit": "pending",
+    "evidenceArtifactSha256": "pending"
+  },
   "evidenceArtifactSha256": "pending"
 }

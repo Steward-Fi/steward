@@ -31,9 +31,15 @@ The operator entrypoint is `@stwd/db/steward-core-repair`. It:
   skipping 0083;
 - renders only the reviewed target-schema bindings in 0091 and 0110;
 - resolves the configured target through `pg_catalog.current_schema()` before
-  changing `search_path`, and holds the session advisory lock, transaction, and
-  unlock on one reserved connection; an injected client is closed rather than
-  returned to its pool when transaction or unlock cleanup is uncertain;
+  changing `search_path`; requires the effective operator to own the target
+  schema (or its database-owned `public` schema), rejects third-party `CREATE`
+  grants, target-object grants to unreviewed roles, and target relations,
+  functions, or types owned by other roles, then sets a target-only
+  `search_path` so PostgreSQL keeps its implicit `pg_catalog` lookup precedence
+  while unqualified DDL lands in the target schema; it holds the session
+  advisory lock, transaction, and unlock on one reserved connection; an
+  injected client is closed rather than returned to its pool when transaction
+  or unlock cleanup is uncertain;
 - compares the complete actual catalog delta to the checked-in public or
   steward manifest before it records provenance or commits; and
 - records source hash, rendered hash, target schema, source head, and bundle
@@ -143,8 +149,16 @@ reports `already_applied`:
 
 ```bash
 export DATABASE_URL=FROM_SECRET_MANAGER
+export STEWARD_CORE_REPAIR_EXPECTED_SCHEMA=steward
 bun --cwd packages/db migrate:steward-schema
 ```
+
+Run this command with the same effective owner-bound database role that will
+start the candidate. The command and readiness probe require the configured
+data schema to resolve exactly to the pinned schema, require that role to own
+the bootstrap schema and functions, and reject PUBLIC or third-party grants on
+that bootstrap surface. A split app/migrator role is not part of this release's
+reviewed grant contract and therefore fails closed.
 
 The production candidate must disable the ordinary shared-ledger migrator and
 select the explicit Steward-owned readiness contract:
@@ -169,6 +183,12 @@ ledger. Production `SKIP_MIGRATIONS` without an explicit readiness mode is a
 configuration error. `/ready` repeats the same checks through a bounded,
 single-flight cache and exposes only boolean results without the configured
 probe token.
+
+Steward-owned mode also fails startup if an enabled plugin owns a separate
+schema or migration journal without its own reviewed readiness contract. For
+this release, `capabilities` is such a plugin; disable it for the cutover unless
+its schema-specific contract is independently added and reviewed. Schema-less
+plugins remain eligible.
 
 Keep the Railway deployment healthcheck configured (at minimum `/health`) so a
 candidate that exits before its listener cannot displace the healthy image.
@@ -256,12 +276,15 @@ bun --cwd packages/db check:steward-core-repair-old-image
 The receipt validator pins both image digests and source commits, the repair
 version, target schema, and catalog-manifest hash. It hashes the supplied
 evidence artifact itself and requires that exact digest in the receipt. It also
-requires matching before/after probes on an isolated production restore,
-automatic migrations disabled for both images, proof that the legacy provider
-resume is blocked by 0084, a successful candidate evidence-bearing
-resume/execution, an explicit forward-only rollback mode, and an independent
-reviewer. The receipt is a procedural attestation reviewed with its evidence;
-it is not a cryptographic signature. Until it passes, the production gate is
+requires matching rollback-image probes before and after repair, the same full
+probe set on the exact candidate after 0111–0114, automatic migrations disabled
+for both images, proof that the legacy provider resume is blocked by 0084, a
+successful candidate evidence-bearing resume/execution, an explicit
+forward-only rollback mode, and an independent approval bound to the exact
+candidate source and evidence hash. The receipt is a procedural attestation
+reviewed with its evidence; it is not a cryptographic signature, so branch
+protection must independently show the matching external approval. Until it
+passes, the production gate is
 **NO-GO** even when the repair command reports `eligible`.
 
 ### Forward-only blue/green exercise

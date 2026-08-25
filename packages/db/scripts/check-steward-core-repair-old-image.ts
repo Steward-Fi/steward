@@ -36,15 +36,24 @@ type CompatibilityReceipt = {
     sourceCommit: string;
     automaticMigrationsDisabled: boolean;
   };
+  /** Exact rollback image against the untouched restore. */
   preRepair: Partial<Record<CompatibilityProbe, string>>;
+  /** Exact rollback image after the core repair, with provider execution drained. */
   postRepair: Partial<Record<CompatibilityProbe, string>>;
+  /** Exact candidate after core repair plus the schema-aware auth bundle. */
+  candidatePostRepair: Partial<Record<CompatibilityProbe, string>>;
   providerExecution: {
     drainedBeforeRepair: boolean;
     legacyResume: string;
     candidateEvidenceResumeAndExecution: string;
     rollbackMode: string;
   };
-  reviewedBy: string;
+  independentReview: {
+    reviewedBy: string;
+    disposition: string;
+    candidateSourceCommit: string;
+    evidenceArtifactSha256: string;
+  };
   evidenceArtifactSha256: string;
 };
 
@@ -75,7 +84,7 @@ export function validateStewardCoreRepairOldImageReceipt(
 ): CompatibilityReceipt {
   const receipt = parseReceipt(value);
   if (
-    receipt.proofVersion !== 1 ||
+    receipt.proofVersion !== 2 ||
     receipt.databaseClass !== "isolated-production-restore" ||
     receipt.productionDatabaseTouched !== false ||
     receipt.targetSchema !== "steward" ||
@@ -106,9 +115,13 @@ export function validateStewardCoreRepairOldImageReceipt(
     throw new Error("old-image compatibility receipt does not pin the approved candidate image");
   }
   for (const probe of REQUIRED_PROBES) {
-    if (receipt.preRepair?.[probe] !== "pass" || receipt.postRepair?.[probe] !== "pass") {
+    if (
+      receipt.preRepair?.[probe] !== "pass" ||
+      receipt.postRepair?.[probe] !== "pass" ||
+      receipt.candidatePostRepair?.[probe] !== "pass"
+    ) {
       throw new Error(
-        `old-image compatibility probe ${probe} is not green before and after repair`,
+        `compatibility probe ${probe} is not green on both rollback-image stages and the candidate stage`,
       );
     }
   }
@@ -121,12 +134,20 @@ export function validateStewardCoreRepairOldImageReceipt(
   ) {
     throw new Error("old-image compatibility receipt does not prove the governed-action boundary");
   }
-  const reviewer = receipt.reviewedBy?.trim().toLowerCase();
-  if (!reviewer || reviewer === "wakesync") {
-    throw new Error("old-image compatibility receipt requires an independent reviewer");
-  }
   if (receipt.evidenceArtifactSha256 !== expectedCandidate.evidenceArtifactSha256) {
     throw new Error("old-image compatibility evidence artifact hash does not match the file");
+  }
+  const reviewer = receipt.independentReview?.reviewedBy?.trim().toLowerCase();
+  if (
+    !reviewer ||
+    reviewer === "wakesync" ||
+    receipt.independentReview?.disposition !== "approved" ||
+    receipt.independentReview?.candidateSourceCommit !== expectedCandidate.sourceCommit ||
+    receipt.independentReview?.evidenceArtifactSha256 !== expectedCandidate.evidenceArtifactSha256
+  ) {
+    throw new Error(
+      "compatibility receipt requires an independent approval bound to the candidate and evidence",
+    );
   }
   return receipt;
 }

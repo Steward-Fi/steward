@@ -28,21 +28,37 @@
  *
  * PARITY (load-bearing)
  * ---------------------
- * BOTH the app-composition path (`composeApp`) and the migration-composition path
- * (`runComposedPluginMigrations`) call THIS resolver, so a plugin's routes and
- * its migrations are always BOTH-on or BOTH-off. they can never drift into an
- * orphaned state (routes mounted with no schema, or schema migrated with no
- * routes). the single source of truth is here.
+ * BOTH the app-composition path (`composeApp`) and the ordinary Drizzle
+ * migration-composition path (`runComposedPluginMigrations`) call THIS resolver,
+ * so a plugin's routes and migrations are BOTH-on or BOTH-off. steward-owned
+ * deployments do not run plugin Drizzle migrations; the startup readiness guard
+ * uses the schema-ownership metadata below to refuse those deployments unless a
+ * reviewed migration/readiness contract exists for every enabled schema owner.
  */
 
 /**
- * The closed set of opt-in plugin names this composition root knows how to
- * register. An entry in `STEWARD_PLUGINS` that is NOT in this set is a
- * fail-closed boot error (see {@link resolveEnabledPlugins}). Kept as the single
- * authority for "what can be enabled" so adding a plugin is a one-line change
- * here plus its registration in compose.ts.
+ * Migration profile for every opt-in plugin this composition root knows how to
+ * register. Keeping enablement and schema ownership in one closed map makes a
+ * new plugin declare whether it owns schema before it can become a known plugin.
+ * `plugin-drizzle` means the plugin contributes its own namespaced Drizzle
+ * journal; `none` means it has no plugin-owned migration source.
  */
-export const KNOWN_PLUGIN_NAMES = new Set<string>(["trading", "capabilities", "wxmr"]);
+const PLUGIN_MIGRATION_PROFILES = {
+  trading: "none",
+  capabilities: "plugin-drizzle",
+  wxmr: "none",
+} as const satisfies Record<string, "none" | "plugin-drizzle">;
+
+export const KNOWN_PLUGIN_NAMES = new Set<string>(Object.keys(PLUGIN_MIGRATION_PROFILES));
+
+/** Return enabled plugins that own a plugin-specific database schema/journal. */
+export function resolveSchemaOwningPlugins(enabledPlugins: ReadonlySet<string>): string[] {
+  return [...enabledPlugins].filter(
+    (name) =>
+      PLUGIN_MIGRATION_PROFILES[name as keyof typeof PLUGIN_MIGRATION_PROFILES] ===
+      "plugin-drizzle",
+  );
+}
 
 /**
  * Error thrown when `STEWARD_PLUGINS` names a plugin this composition root does

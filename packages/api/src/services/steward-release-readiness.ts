@@ -4,6 +4,8 @@ import {
   type StewardReleaseSchema,
 } from "@stwd/db/steward-release-readiness";
 import { STEWARD_SCHEMA_MIGRATIONS_MODE } from "@stwd/db/steward-schema-migrations";
+import { sql } from "drizzle-orm";
+import { resolveSchemaOwningPlugins } from "../plugin-config";
 
 export type StewardMigrationReadinessConfig =
   | { mode: "drizzle" }
@@ -19,6 +21,60 @@ type ReadinessEnvironment = {
 type InspectRelease = (options: {
   expectedSchema: StewardReleaseSchema;
 }) => Promise<StewardReleaseReadinessInspection>;
+
+/**
+ * Schema-owning plugins whose migrations and ledger are covered by the
+ * steward-owned startup/readiness inspection. This is intentionally empty:
+ * capabilities currently has only a plugin-Drizzle contract. Add an entry only
+ * with the independently reviewed inspection that proves that plugin's schema
+ * and ledger are ready before the listener opens.
+ */
+const REVIEWED_STEWARD_OWNED_PLUGIN_READINESS_CONTRACTS: ReadonlySet<string> = new Set();
+
+/**
+ * Steward-owned mode skips every plugin's Drizzle migrator. Refuse to compose
+ * routes backed by an unverified plugin schema rather than booting a partially
+ * migrated application. Ordinary Drizzle mode continues to run those migrations
+ * and is deliberately unaffected by this guard.
+ */
+export function assertStewardOwnedPluginMigrationReadiness(
+  config: StewardMigrationReadinessConfig,
+  enabledPlugins: ReadonlySet<string>,
+): void {
+  if (config.mode !== "steward-owned") return;
+
+  const missingContracts = resolveSchemaOwningPlugins(enabledPlugins)
+    .filter((name) => !REVIEWED_STEWARD_OWNED_PLUGIN_READINESS_CONTRACTS.has(name))
+    .sort();
+  if (missingContracts.length === 0) return;
+
+  throw new Error(
+    "Steward-owned migration readiness has no reviewed migration/readiness contract for " +
+      `enabled schema-owning plugin(s): ${missingContracts.join(", ")}. ` +
+      "Disable those plugins or add their independently reviewed startup/readiness contract " +
+      "before enabling them in steward-owned mode.",
+  );
+}
+
+/**
+ * Query the full ordinary-Drizzle ledger in deterministic migration-id order.
+ * The ORDER BY is deliberately on the outer query: PostgreSQL does not preserve
+ * a derived table's row order unless the consuming SELECT orders its result.
+ */
+export function ordinaryDrizzleMigrationReadinessQuery() {
+  return sql`
+    SELECT
+      EXTRACT(EPOCH FROM clock_timestamp()) * 1000 AS database_time_ms,
+      migrations.hash AS migration_hash,
+      migrations.created_at AS migration_created_at
+    FROM (SELECT 1) AS singleton
+    LEFT JOIN LATERAL (
+      SELECT id, hash, created_at
+      FROM drizzle.__drizzle_migrations
+    ) AS migrations ON TRUE
+    ORDER BY migrations.id ASC
+  `;
+}
 
 export function resolveStewardMigrationReadinessConfig(
   env: ReadinessEnvironment = process.env,

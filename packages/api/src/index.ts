@@ -48,7 +48,9 @@ import {
   SOCKET_PEER_ENV_KEY,
 } from "./services/runtime-gate";
 import {
+  assertStewardOwnedPluginMigrationReadiness,
   createStewardReleaseReadinessProbe,
+  ordinaryDrizzleMigrationReadinessQuery,
   resolveStewardMigrationReadinessConfig,
 } from "./services/steward-release-readiness";
 import { startTransactionReceiptPollingScheduler } from "./services/transaction-receipt-poller";
@@ -66,6 +68,8 @@ const startTime = Date.now();
 const migrationExpectation = getMigrationExpectation();
 const migrationLedgerExpectation = getMigrationLedgerExpectation();
 const migrationReadinessConfig = resolveStewardMigrationReadinessConfig();
+const enabledPlugins = resolveEnabledPlugins();
+assertStewardOwnedPluginMigrationReadiness(migrationReadinessConfig, enabledPlugins);
 const stewardReleaseReadinessProbe =
   migrationReadinessConfig.mode === "steward-owned"
     ? createStewardReleaseReadinessProbe({
@@ -84,7 +88,7 @@ validateJwtSecretEnv();
 // plugin is dynamically imported so the lean core graph never statically pulls
 // in the trading stack. top-level await is supported by the Bun entry.
 const app = await composeApp();
-const capabilitiesEnabled = resolveEnabledPlugins().has("capabilities");
+const capabilitiesEnabled = enabledPlugins.has("capabilities");
 
 // ─── In-memory rate-limit log + shutdown guard ───────────────────────────────
 //
@@ -193,18 +197,7 @@ app.get("/ready", async (c) => {
         ? await db.execute(sql`
             SELECT EXTRACT(EPOCH FROM clock_timestamp()) * 1000 AS database_time_ms
           `)
-        : await db.execute(sql`
-            SELECT
-              EXTRACT(EPOCH FROM clock_timestamp()) * 1000 AS database_time_ms,
-              migrations.hash AS migration_hash,
-              migrations.created_at AS migration_created_at
-            FROM (SELECT 1) AS singleton
-            LEFT JOIN LATERAL (
-              SELECT hash, created_at
-              FROM drizzle.__drizzle_migrations
-              ORDER BY id ASC
-            ) AS migrations ON TRUE
-          `);
+        : await db.execute(ordinaryDrizzleMigrationReadinessQuery());
     const rows = Array.isArray(result)
       ? result
       : ((result as unknown as { rows?: unknown[] }).rows ?? []);

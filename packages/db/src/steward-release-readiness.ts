@@ -44,7 +44,10 @@ export async function inspectStewardReleaseReadiness(
       expectedSchema: options.expectedSchema,
       client,
     });
-    const authSchema = await inspectStewardSchemaMigrations({ client });
+    const authSchema = await inspectStewardSchemaMigrations({
+      client,
+      expectedSchema: options.expectedSchema,
+    });
     if (authSchema.schema !== options.expectedSchema) {
       throw new Error("Steward release readiness inspections resolved different data schemas");
     }

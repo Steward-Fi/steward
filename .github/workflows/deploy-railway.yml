@@ -148,6 +148,9 @@ jobs:
           RAILWAY_ENV_ID: ${{ vars.PRODUCTION_RAILWAY_ENV_ID }}
           RAILWAY_HEALTH_URL: ${{ vars.PRODUCTION_RAILWAY_HEALTH_URL }}
           RAILWAY_REQUIRE_HEALTH: "true"
+          RAILWAY_REQUIRE_READY: "true"
+          RAILWAY_READY_PROBE_TOKEN: ${{ secrets.STEWARD_READY_PROBE_TOKEN }}
+          RAILWAY_EXPECTED_REVISION: ${{ steps.resolve.outputs.sha }}
           RAILWAY_IMAGE_REPO: ${{ steps.resolve.outputs.image_repo }}
           RAILWAY_IMAGE_DIGEST: ${{ steps.resolve.outputs.digest }}
           DRY_RUN: ${{ inputs.dry_run }}
