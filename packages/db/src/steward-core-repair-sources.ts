@@ -432,6 +432,51 @@ export async function queryStewardCatalog(
   }));
 }
 
+export async function queryStewardNonInternalTriggerFunctions(
+  executor: StewardCoreRepairExecutor,
+  schema: StewardCoreRepairSchema,
+): Promise<StewardCatalogRecord[]> {
+  const rows = await executor.unsafe<{
+    kind: string;
+    object_name: string;
+    definition: string;
+  }>(
+    `
+      SELECT
+        'function'::text AS kind,
+        function_namespace.nspname || '.' || procedure.proname ||
+          '(' || pg_catalog.pg_get_function_identity_arguments(procedure.oid) || ')' AS object_name,
+        procedure.prokind::text || '|' || pg_catalog.pg_get_function_result(procedure.oid) || '|' ||
+          language.lanname || '|' || procedure.provolatile::text || '|' ||
+          procedure.prosecdef::text || '|' || procedure.proparallel::text || '|' ||
+          COALESCE(array_to_string(procedure.proconfig, ','), '') || '|' ||
+          regexp_replace(pg_catalog.pg_get_functiondef(procedure.oid), E'[\\n\\r\\t]+', ' ', 'g')
+          AS definition
+      FROM pg_catalog.pg_proc procedure
+      JOIN pg_catalog.pg_namespace function_namespace
+        ON function_namespace.oid = procedure.pronamespace
+      JOIN pg_catalog.pg_language language ON language.oid = procedure.prolang
+      WHERE procedure.oid IN (
+        SELECT DISTINCT trigger_record.tgfoid
+        FROM pg_catalog.pg_trigger trigger_record
+        JOIN pg_catalog.pg_class relation ON relation.oid = trigger_record.tgrelid
+        JOIN pg_catalog.pg_namespace relation_namespace
+          ON relation_namespace.oid = relation.relnamespace
+        WHERE relation_namespace.nspname = $1::text
+          AND NOT trigger_record.tgisinternal
+      )
+      ORDER BY kind, object_name, definition
+    `,
+    [schema],
+  );
+
+  return rows.map((row) => ({
+    kind: row.kind,
+    objectName: row.object_name,
+    definition: row.definition,
+  }));
+}
+
 export function stewardCatalogKey(
   record: Pick<StewardCatalogRecord, "kind" | "objectName">,
 ): string {

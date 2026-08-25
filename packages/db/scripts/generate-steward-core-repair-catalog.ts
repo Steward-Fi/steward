@@ -6,6 +6,7 @@ import {
   loadStewardCoreRepairSources,
   mapStewardCatalog,
   queryStewardCatalog,
+  queryStewardNonInternalTriggerFunctions,
   quoteStewardCoreRepairIdentifier,
   STEWARD_CORE_REPAIR_SOURCE_HEAD,
   STEWARD_CORE_REPAIR_VERSION,
@@ -30,6 +31,12 @@ type CatalogEnvelope = {
   beforeHash: string;
   afterHash: string;
   deltaHash: string;
+};
+
+type ExactCatalogEnvelope = {
+  recordCount: number;
+  records: StewardCatalogRecord[];
+  hash: string;
 };
 
 const databaseUrl = process.env.DATABASE_URL;
@@ -111,6 +118,15 @@ function catalogEnvelope(
   };
 }
 
+function exactCatalogEnvelope(records: StewardCatalogRecord[], kind: string): ExactCatalogEnvelope {
+  const exactRecords = records.filter((record) => record.kind === kind);
+  return {
+    recordCount: exactRecords.length,
+    records: exactRecords,
+    hash: sha256(JSON.stringify(exactRecords)),
+  };
+}
+
 function semanticFinalCounts(changes: CatalogDefinitionChange[]): Record<string, number> {
   const counts: Record<string, number> = {};
   for (const change of changes) {
@@ -170,6 +186,10 @@ async function buildSchemaManifest(
       client as unknown as StewardCoreRepairExecutor,
       schema,
     );
+    const discontinuityTriggerFunctions = await queryStewardNonInternalTriggerFunctions(
+      client as unknown as StewardCoreRepairExecutor,
+      schema,
+    );
 
     const sources = loadStewardCoreRepairSources(schema);
     let after0082: StewardCatalogRecord[] = [];
@@ -200,6 +220,10 @@ async function buildSchemaManifest(
       client as unknown as StewardCoreRepairExecutor,
       schema,
     );
+    const repairedTriggerFunctions = await queryStewardNonInternalTriggerFunctions(
+      client as unknown as StewardCoreRepairExecutor,
+      schema,
+    );
 
     const existing0083Definitions = diffCatalog(before0083, discontinuity);
     const changes0082Definitions = diffCatalog(discontinuity, after0082);
@@ -209,6 +233,14 @@ async function buildSchemaManifest(
     const changes0082 = catalogEnvelope(changes0082Definitions, false);
     const changes0084To0110 = catalogEnvelope(changes0084To0110Definitions, false);
     const changes = catalogEnvelope(changesDefinitions, true);
+    const nonInternalTriggers = {
+      before: exactCatalogEnvelope(discontinuity, "trigger"),
+      after: exactCatalogEnvelope(repaired, "trigger"),
+    };
+    const nonInternalTriggerFunctions = {
+      before: exactCatalogEnvelope(discontinuityTriggerFunctions, "function"),
+      after: exactCatalogEnvelope(repairedTriggerFunctions, "function"),
+    };
     const changedKeys = new Set(changesDefinitions.map((record) => stewardCatalogKey(record)));
     if (changedKeys.size !== changesDefinitions.length) {
       throw new Error(`${schema} repair manifest contains duplicate changed catalog keys`);
@@ -225,6 +257,8 @@ async function buildSchemaManifest(
         semanticFinalCounts: semanticFinalCounts(changes0084To0110Definitions),
       },
       changes,
+      nonInternalTriggers,
+      nonInternalTriggerFunctions,
     };
   } finally {
     await client.end({ timeout: 5 });
@@ -244,7 +278,7 @@ try {
   const publicManifest = await buildSchemaManifest(admin, originalUrl, "public");
   const stewardManifest = await buildSchemaManifest(admin, originalUrl, "steward");
   const manifest = {
-    manifestVersion: 1,
+    manifestVersion: 2,
     repairVersion: STEWARD_CORE_REPAIR_VERSION,
     sourceHead: STEWARD_CORE_REPAIR_SOURCE_HEAD,
     schemas: {

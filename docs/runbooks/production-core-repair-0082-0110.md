@@ -25,6 +25,10 @@ The operator entrypoint is `@stwd/db/steward-core-repair`. It:
 - verifies all 47 catalog records introduced or changed by the existing 0083;
 - verifies the exact pre-repair value for every one of the 391 catalog keys the
   bundle changes;
+- pins the complete set and exact definitions of all noninternal triggers (7
+  before repair and 21 after repair) and every function resolved through their
+  `pg_trigger.tgfoid` bindings (3 before and 14 after), for both reviewed target
+  schemas;
 - repeats aggregate data gates after excluding application writes with table
   locks;
 - applies exact 0082 and exact 0084–0110 in one serializable transaction while
@@ -34,22 +38,28 @@ The operator entrypoint is `@stwd/db/steward-core-repair`. It:
   changing `search_path`; requires the effective operator to own the target
   schema (or its database-owned `public` schema), rejects third-party `CREATE`
   grants, target-object grants to unreviewed roles, and target relations,
-  functions, or types owned by other roles, then sets a target-only
+  functions, or types owned by other roles; every noninternal trigger must
+  reference a function in the target schema owned by the runtime role, and the
+  database must contain no enabled event trigger capable of running arbitrary
+  DDL or DML during the repair; then it sets a target-only
   `search_path` so PostgreSQL keeps its implicit `pg_catalog` lookup precedence
   while unqualified DDL lands in the target schema; it holds the session
   advisory lock, transaction, and unlock on one reserved connection; an
   injected client is closed rather than returned to its pool when transaction
   or unlock cleanup is uncertain;
-- compares the complete actual catalog delta to the checked-in public or
-  steward manifest before it records provenance or commits; and
+- compares the complete actual catalog delta and exact post-repair trigger and
+  bound-function sets to the checked-in public or steward manifest before it
+  records provenance, then repeats the reviewed catalog phase and both exact
+  trigger surfaces after provenance DDL and immediately before commit; and
 - records source hash, rendered hash, target schema, source head, and bundle
   hash in schema-local `__steward_core_repair_migrations` rows.
 
 The marker table is provenance, not the acceptance gate. A second invocation
-validates every exact post-repair catalog record before reporting
-`already_applied`. Do not change application readiness to trust only this
-table. The shared `drizzle.__drizzle_migrations` ledger belongs to Eliza in the
-observed production database and is never read or written by this bundle.
+validates every reviewed post-repair catalog key before reporting
+`already_applied`, including the complete noninternal-trigger and bound-function
+sets. Do not change application readiness to trust only this table. The shared
+`drizzle.__drizzle_migrations` ledger belongs to Eliza in the observed
+production database and is never read or written by this bundle.
 
 The generated 0084–0110 slice reproduces the independent preflight envelope:
 152 columns, 70 explicit constraints, one enum label, 14 functions, 39 indexes,

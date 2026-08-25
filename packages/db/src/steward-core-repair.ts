@@ -7,6 +7,7 @@ import {
   loadStewardCoreRepairSources,
   mapStewardCatalog,
   queryStewardCatalog,
+  queryStewardNonInternalTriggerFunctions,
   quoteStewardCoreRepairIdentifier,
   STEWARD_CORE_REPAIR_LEDGER,
   STEWARD_CORE_REPAIR_SOURCE_HEAD,
@@ -40,12 +41,26 @@ type CatalogDefinitionChange = CatalogKey & {
   after: string[];
 };
 
+type ExactCatalogEnvelope = {
+  recordCount: number;
+  records: StewardCatalogRecord[];
+  hash: string;
+};
+
 type SchemaCatalogManifest = {
   serverVersionNum: string;
   existing0083: CatalogEnvelope;
   changes0082: CatalogEnvelope;
   changes0084To0110: CatalogEnvelope & { semanticFinalCounts: Record<string, number> };
   changes: CatalogEnvelope;
+  nonInternalTriggers: {
+    before: ExactCatalogEnvelope;
+    after: ExactCatalogEnvelope;
+  };
+  nonInternalTriggerFunctions: {
+    before: ExactCatalogEnvelope;
+    after: ExactCatalogEnvelope;
+  };
 };
 
 type CoreRepairCatalogManifest = {
@@ -177,7 +192,7 @@ async function runReservedTransaction<T>(
 
 function getSchemaManifest(schema: StewardCoreRepairSchema): SchemaCatalogManifest {
   if (
-    catalogManifest.manifestVersion !== 1 ||
+    catalogManifest.manifestVersion !== 2 ||
     catalogManifest.repairVersion !== STEWARD_CORE_REPAIR_VERSION ||
     catalogManifest.sourceHead !== STEWARD_CORE_REPAIR_SOURCE_HEAD
   ) {
@@ -191,11 +206,31 @@ function getSchemaManifest(schema: StewardCoreRepairSchema): SchemaCatalogManife
     manifest.existing0083.keyCount === 0 ||
     manifest.existing0083.keys?.length !== manifest.existing0083.keyCount ||
     manifest.changes0082.keyCount === 0 ||
-    manifest.changes0084To0110.keyCount === 0
+    manifest.changes0084To0110.keyCount === 0 ||
+    !isExactCatalogEnvelope(manifest.nonInternalTriggers?.before, "trigger") ||
+    !isExactCatalogEnvelope(manifest.nonInternalTriggers?.after, "trigger") ||
+    !isExactCatalogEnvelope(manifest.nonInternalTriggerFunctions?.before, "function") ||
+    !isExactCatalogEnvelope(manifest.nonInternalTriggerFunctions?.after, "function")
   ) {
     throw new Error(`core-repair catalog manifest for ${schema} is missing or empty`);
   }
   return manifest;
+}
+
+function isExactCatalogEnvelope(
+  envelope: ExactCatalogEnvelope | undefined,
+  kind: string,
+): envelope is ExactCatalogEnvelope {
+  if (
+    !envelope ||
+    envelope.recordCount === 0 ||
+    !Array.isArray(envelope.records) ||
+    envelope.records.length !== envelope.recordCount ||
+    envelope.records.some((record) => record.kind !== kind)
+  ) {
+    return false;
+  }
+  return sha256(JSON.stringify(envelope.records)) === envelope.hash;
 }
 
 async function assertCatalogPostgresMajor(
@@ -236,6 +271,8 @@ function getBundleHash(
       })),
       existing0083: manifest.existing0083,
       changes: manifest.changes,
+      nonInternalTriggers: manifest.nonInternalTriggers,
+      nonInternalTriggerFunctions: manifest.nonInternalTriggerFunctions,
     }),
   );
 }
@@ -267,6 +304,49 @@ function assertCatalogPhase(
   if (actualHash !== expectedHash) {
     throw new Error(`${label} exact catalog envelope mismatch; refusing repair`);
   }
+}
+
+function assertExactCatalogEnvelope(
+  records: StewardCatalogRecord[],
+  envelope: ExactCatalogEnvelope,
+  kind: string,
+  label: string,
+): void {
+  if (!isExactCatalogEnvelope(envelope, kind)) {
+    throw new Error(`${label} reviewed catalog envelope is invalid`);
+  }
+  const actual = records.filter((record) => record.kind === kind);
+  const serialized = JSON.stringify(actual);
+  if (
+    actual.length !== envelope.recordCount ||
+    serialized !== JSON.stringify(envelope.records) ||
+    sha256(serialized) !== envelope.hash
+  ) {
+    throw new Error(`${label} exact catalog envelope mismatch; refusing repair`);
+  }
+}
+
+async function assertNonInternalTriggerSurface(
+  transaction: StewardCoreRepairExecutor,
+  schema: StewardCoreRepairSchema,
+  catalog: StewardCatalogRecord[],
+  manifest: SchemaCatalogManifest,
+  phase: "before" | "after",
+  label: string,
+): Promise<void> {
+  assertExactCatalogEnvelope(
+    catalog,
+    manifest.nonInternalTriggers[phase],
+    "trigger",
+    `${label} noninternal-trigger`,
+  );
+  const triggerFunctions = await queryStewardNonInternalTriggerFunctions(transaction, schema);
+  assertExactCatalogEnvelope(
+    triggerFunctions,
+    manifest.nonInternalTriggerFunctions[phase],
+    "function",
+    `${label} bound-trigger-function`,
+  );
 }
 
 function diffCatalog(
@@ -338,6 +418,8 @@ type RepairSchemaTrustRow = {
   unexpected_relation_grant: boolean;
   unexpected_column_grant: boolean;
   unexpected_function_grant: boolean;
+  unexpected_trigger_binding: boolean;
+  enabled_event_trigger: boolean;
   unowned_relation_count: string | number;
   unowned_function_count: string | number;
   unowned_type_count: string | number;
@@ -407,6 +489,29 @@ async function assertTrustedRepairSchema(
           WHERE procedure_namespace.nspname = $1
             AND function_acl.grantee NOT IN (0, procedure.proowner, runtime_role.oid)
         ) AS unexpected_function_grant,
+        EXISTS (
+          SELECT 1
+          FROM pg_catalog.pg_trigger trigger_record
+          JOIN pg_catalog.pg_class trigger_relation
+            ON trigger_relation.oid = trigger_record.tgrelid
+          JOIN pg_catalog.pg_namespace trigger_relation_namespace
+            ON trigger_relation_namespace.oid = trigger_relation.relnamespace
+          JOIN pg_catalog.pg_proc trigger_function
+            ON trigger_function.oid = trigger_record.tgfoid
+          JOIN pg_catalog.pg_namespace trigger_function_namespace
+            ON trigger_function_namespace.oid = trigger_function.pronamespace
+          WHERE trigger_relation_namespace.nspname = $1
+            AND NOT trigger_record.tgisinternal
+            AND (
+              trigger_function_namespace.nspname <> $1
+              OR trigger_function.proowner <> runtime_role.oid
+            )
+        ) AS unexpected_trigger_binding,
+        EXISTS (
+          SELECT 1
+          FROM pg_catalog.pg_event_trigger event_trigger
+          WHERE event_trigger.evtenabled <> 'D'
+        ) AS enabled_event_trigger,
         (
           SELECT count(*)
           FROM pg_catalog.pg_class relation
@@ -455,6 +560,12 @@ async function assertTrustedRepairSchema(
     trust.unexpected_function_grant === true
   ) {
     throw new Error("core-repair target objects grant privileges to an unreviewed role");
+  }
+  if (trust.unexpected_trigger_binding === true) {
+    throw new Error("core-repair target contains an unreviewed trigger");
+  }
+  if (trust.enabled_event_trigger === true) {
+    throw new Error("core-repair database contains an enabled event trigger");
   }
   if (
     Number(trust.unowned_relation_count) !== 0 ||
@@ -528,7 +639,9 @@ const LOCKED_BASELINE_TABLES = [
   "provider_accounts",
   "provider_action_audit_outbox",
   "provider_action_bindings",
+  "provider_grants",
   "provider_operations",
+  "provider_role_bindings",
   "secret_routes",
   "secrets",
   "tenants",
@@ -797,6 +910,14 @@ async function applyInTransaction(
   if (await ledgerExists(transaction, schema)) {
     await assertLedger(transaction, schema, sources, bundleHash);
     const catalog = await queryStewardCatalog(transaction, schema);
+    await assertNonInternalTriggerSurface(
+      transaction,
+      schema,
+      catalog,
+      manifest,
+      "after",
+      "already-applied",
+    );
     assertCatalogPhase(catalog, manifest.changes, "after", "already-applied");
     return {
       status: "already_applied",
@@ -811,6 +932,14 @@ async function applyInTransaction(
   }
 
   const before = await queryStewardCatalog(transaction, schema);
+  await assertNonInternalTriggerSurface(
+    transaction,
+    schema,
+    before,
+    manifest,
+    "before",
+    "pre-repair",
+  );
   assertCatalogPhase(before, manifest.existing0083, "after", "0083 existing-state");
   assertCatalogPhase(before, manifest.changes, "before", "pre-repair");
   await assertObservedDiscontinuity(transaction, schema);
@@ -822,6 +951,14 @@ async function applyInTransaction(
   }
 
   const after = await queryStewardCatalog(transaction, schema);
+  await assertNonInternalTriggerSurface(
+    transaction,
+    schema,
+    after,
+    manifest,
+    "after",
+    "post-repair",
+  );
   assertCatalogPhase(after, manifest.changes, "after", "post-repair");
   assertExactCatalogDelta(before, after, manifest.changes);
   await installLedger(transaction, schema, sources, bundleHash);
@@ -831,6 +968,20 @@ async function applyInTransaction(
   // privileges can attach third-party grants only when new objects are
   // created, so the preflight trust check alone cannot detect them.
   await assertTrustedRepairSchema(transaction, schema);
+  // Ledger creation is the final reviewed DDL statement. A database event
+  // trigger can run during that CREATE TABLE even when every target object is
+  // runtime-owned, so re-establish the exact trigger envelope after the ledger
+  // and immediately before commit.
+  const finalCatalog = await queryStewardCatalog(transaction, schema);
+  await assertNonInternalTriggerSurface(
+    transaction,
+    schema,
+    finalCatalog,
+    manifest,
+    "after",
+    "final post-repair",
+  );
+  assertCatalogPhase(finalCatalog, manifest.changes, "after", "final post-repair");
 
   return {
     status: "applied",
@@ -867,6 +1018,14 @@ async function inspectInTransaction(
   if (await ledgerExists(transaction, schema)) {
     await assertLedger(transaction, schema, sources, bundleHash);
     const catalog = await queryStewardCatalog(transaction, schema);
+    await assertNonInternalTriggerSurface(
+      transaction,
+      schema,
+      catalog,
+      manifest,
+      "after",
+      "already-applied",
+    );
     assertCatalogPhase(catalog, manifest.changes, "after", "already-applied");
     return {
       status: "already_applied",
@@ -878,6 +1037,14 @@ async function inspectInTransaction(
   }
 
   const catalog = await queryStewardCatalog(transaction, schema);
+  await assertNonInternalTriggerSurface(
+    transaction,
+    schema,
+    catalog,
+    manifest,
+    "before",
+    "pre-repair",
+  );
   assertCatalogPhase(catalog, manifest.existing0083, "after", "0083 existing-state");
   assertCatalogPhase(catalog, manifest.changes, "before", "pre-repair");
   await assertObservedDiscontinuity(transaction, schema);
@@ -912,6 +1079,14 @@ async function inspectAppliedInTransaction(
   }
   await assertLedger(transaction, schema, sources, bundleHash);
   const catalog = await queryStewardCatalog(transaction, schema);
+  await assertNonInternalTriggerSurface(
+    transaction,
+    schema,
+    catalog,
+    manifest,
+    "after",
+    "release-readiness",
+  );
   assertCatalogPhase(catalog, manifest.changes, "after", "release-readiness");
   return {
     status: "already_applied",

@@ -151,6 +151,23 @@ describe("Steward production core-repair source envelope", () => {
         relation: 11,
         trigger: 14,
       });
+      const triggers = catalogManifest.schemas[schema].nonInternalTriggers;
+      expect(triggers.before.recordCount).toBe(7);
+      expect(triggers.after.recordCount).toBe(21);
+      for (const envelope of [triggers.before, triggers.after]) {
+        expect(envelope.records).toHaveLength(envelope.recordCount);
+        expect(envelope.records.every((record) => record.kind === "trigger")).toBe(true);
+        expect(sha256(JSON.stringify(envelope.records))).toBe(envelope.hash);
+      }
+      const triggerFunctions = catalogManifest.schemas[schema].nonInternalTriggerFunctions;
+      expect(triggerFunctions.before.recordCount).toBe(3);
+      expect(triggerFunctions.after.recordCount).toBe(14);
+      expect(triggerFunctions.before.hash).not.toBe(triggerFunctions.after.hash);
+      for (const envelope of [triggerFunctions.before, triggerFunctions.after]) {
+        expect(envelope.records).toHaveLength(envelope.recordCount);
+        expect(envelope.records.every((record) => record.kind === "function")).toBe(true);
+        expect(sha256(JSON.stringify(envelope.records))).toBe(envelope.hash);
+      }
     }
   });
 });
@@ -635,6 +652,391 @@ postgresDescribe("Steward production core repair on disposable PostgreSQL", () =
     }
   });
 
+  test("rejects a revoked-grant trigger backed by an attacker-owned external function", async () => {
+    const { client } = await createFixture("steward");
+    const role = await createUntrustedRole();
+    const quotedRole = quoteStewardCoreRepairIdentifier(role);
+    try {
+      await client.unsafe(`
+        GRANT USAGE ON SCHEMA steward TO ${quotedRole};
+        GRANT CREATE ON SCHEMA public TO ${quotedRole};
+        GRANT TRIGGER ON steward.agents TO ${quotedRole};
+        SET ROLE ${quotedRole};
+        CREATE FUNCTION public.steward_repair_attacker_trigger()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+          NEW.name := 'attacker-rewritten';
+          RETURN NEW;
+        END
+        $$;
+        CREATE TRIGGER steward_repair_attacker_trigger
+        BEFORE UPDATE ON steward.agents
+        FOR EACH ROW
+        EXECUTE FUNCTION public.steward_repair_attacker_trigger();
+        RESET ROLE;
+        REVOKE TRIGGER ON steward.agents FROM ${quotedRole};
+        REVOKE USAGE ON SCHEMA steward FROM ${quotedRole};
+        REVOKE CREATE ON SCHEMA public FROM ${quotedRole};
+
+        INSERT INTO steward.tenants (id, name, api_key_hash)
+        VALUES ('tenant-trigger-attack', 'Trigger attack', 'trigger-attack-key');
+        INSERT INTO steward.agents (id, tenant_id, name, wallet_address)
+        VALUES (
+          'agent-trigger-attack',
+          'tenant-trigger-attack',
+          'Before update',
+          '0x4444444444444444444444444444444444444444'
+        );
+        UPDATE steward.agents
+        SET name = 'Expected update'
+        WHERE id = 'agent-trigger-attack';
+      `);
+      const exploit = await client.unsafe<
+        { name: string; function_owner: string; trigger_count: number }[]
+      >(`
+        SELECT
+          agent.name,
+          pg_catalog.pg_get_userbyid(procedure.proowner)::text AS function_owner,
+          (
+            SELECT count(*)::int
+            FROM pg_catalog.pg_trigger trigger_record
+            WHERE trigger_record.tgrelid = 'steward.agents'::regclass
+              AND trigger_record.tgname = 'steward_repair_attacker_trigger'
+              AND NOT trigger_record.tgisinternal
+          ) AS trigger_count
+        FROM steward.agents agent
+        JOIN pg_catalog.pg_proc procedure
+          ON procedure.oid = 'public.steward_repair_attacker_trigger()'::regprocedure
+        WHERE agent.id = 'agent-trigger-attack'
+      `);
+      expect(exploit).toEqual([
+        { name: "attacker-rewritten", function_owner: role, trigger_count: 1 },
+      ]);
+
+      await expect(
+        inspectStewardCoreRepair({
+          expectedSchema: "steward",
+          client: client as unknown as StewardCoreRepairClient,
+        }),
+      ).rejects.toThrow("core-repair target contains an unreviewed trigger");
+
+      await expect(
+        runStewardCoreRepair({
+          expectedSchema: "steward",
+          client: client as unknown as StewardCoreRepairClient,
+        }),
+      ).rejects.toThrow("core-repair target contains an unreviewed trigger");
+
+      const repairState = await client.unsafe<
+        { version_exists: boolean; ledger_exists: boolean }[]
+      >(`
+        SELECT
+          EXISTS (
+            SELECT 1 FROM pg_catalog.pg_attribute attribute
+            JOIN pg_catalog.pg_class relation ON relation.oid = attribute.attrelid
+            WHERE relation.oid = 'steward.execution_authorization_nonces'::regclass
+              AND attribute.attname = 'version'
+              AND attribute.attnum > 0 AND NOT attribute.attisdropped
+          ) AS version_exists,
+          pg_catalog.to_regclass('steward.${STEWARD_CORE_REPAIR_LEDGER}') IS NOT NULL
+            AS ledger_exists
+      `);
+      expect(repairState).toEqual([{ version_exists: false, ledger_exists: false }]);
+    } finally {
+      await client.end({ timeout: 5 });
+    }
+  });
+
+  test("rejects an unexpected runtime-owned trigger outside the reviewed baseline", async () => {
+    const { client } = await createFixture("steward");
+    try {
+      await client.unsafe(`
+        CREATE FUNCTION steward.steward_repair_unreviewed_trigger()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+          RETURN NEW;
+        END
+        $$;
+        CREATE TRIGGER steward_repair_unreviewed_trigger
+        BEFORE UPDATE ON steward.agents
+        FOR EACH ROW
+        EXECUTE FUNCTION steward.steward_repair_unreviewed_trigger();
+      `);
+
+      const expectedError = "pre-repair noninternal-trigger exact catalog envelope mismatch";
+      await expect(
+        inspectStewardCoreRepair({
+          expectedSchema: "steward",
+          client: client as unknown as StewardCoreRepairClient,
+        }),
+      ).rejects.toThrow(expectedError);
+      await expect(
+        runStewardCoreRepair({
+          expectedSchema: "steward",
+          client: client as unknown as StewardCoreRepairClient,
+        }),
+      ).rejects.toThrow(expectedError);
+
+      const repairState = await client.unsafe<
+        { version_exists: boolean; ledger_exists: boolean }[]
+      >(`
+        SELECT
+          EXISTS (
+            SELECT 1 FROM pg_catalog.pg_attribute attribute
+            JOIN pg_catalog.pg_class relation ON relation.oid = attribute.attrelid
+            WHERE relation.oid = 'steward.execution_authorization_nonces'::regclass
+              AND attribute.attname = 'version'
+              AND attribute.attnum > 0 AND NOT attribute.attisdropped
+          ) AS version_exists,
+          pg_catalog.to_regclass('steward.${STEWARD_CORE_REPAIR_LEDGER}') IS NOT NULL
+            AS ledger_exists
+      `);
+      expect(repairState).toEqual([{ version_exists: false, ledger_exists: false }]);
+    } finally {
+      await client.end({ timeout: 5 });
+    }
+  });
+
+  test("rejects a same-count rewire to another runtime-owned trigger function", async () => {
+    const { client } = await createFixture("steward");
+    try {
+      await client.unsafe(`
+        DROP TRIGGER provider_accounts_immutable_owner ON steward.provider_accounts;
+        CREATE TRIGGER provider_accounts_immutable_owner
+        BEFORE UPDATE ON steward.provider_accounts
+        FOR EACH ROW
+        EXECUTE FUNCTION steward.steward_provider_action_binding_guard();
+      `);
+
+      const expectedError = "pre-repair noninternal-trigger exact catalog envelope mismatch";
+      await expect(
+        inspectStewardCoreRepair({
+          expectedSchema: "steward",
+          client: client as unknown as StewardCoreRepairClient,
+        }),
+      ).rejects.toThrow(expectedError);
+      await expect(
+        runStewardCoreRepair({
+          expectedSchema: "steward",
+          client: client as unknown as StewardCoreRepairClient,
+        }),
+      ).rejects.toThrow(expectedError);
+
+      const repairState = await client.unsafe<
+        { trigger_count: number; version_exists: boolean; ledger_exists: boolean }[]
+      >(`
+        SELECT
+          (
+            SELECT count(*)::int
+            FROM pg_catalog.pg_trigger trigger_record
+            JOIN pg_catalog.pg_class relation ON relation.oid = trigger_record.tgrelid
+            JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+            WHERE namespace.nspname = 'steward'
+              AND NOT trigger_record.tgisinternal
+          ) AS trigger_count,
+          EXISTS (
+            SELECT 1 FROM pg_catalog.pg_attribute attribute
+            JOIN pg_catalog.pg_class relation ON relation.oid = attribute.attrelid
+            WHERE relation.oid = 'steward.execution_authorization_nonces'::regclass
+              AND attribute.attname = 'version'
+              AND attribute.attnum > 0 AND NOT attribute.attisdropped
+          ) AS version_exists,
+          pg_catalog.to_regclass('steward.${STEWARD_CORE_REPAIR_LEDGER}') IS NOT NULL
+            AS ledger_exists
+      `);
+      expect(repairState).toEqual([
+        { trigger_count: 7, version_exists: false, ledger_exists: false },
+      ]);
+    } finally {
+      await client.end({ timeout: 5 });
+    }
+  });
+
+  test("rejects a runtime-owned bound trigger function body outside the reviewed baseline", async () => {
+    const { client } = await createFixture("steward");
+    try {
+      await client.unsafe(`
+        CREATE OR REPLACE FUNCTION steward.steward_reject_provider_scope_move()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+          RETURN NEW;
+        END
+        $$;
+      `);
+
+      const expectedError = "pre-repair bound-trigger-function exact catalog envelope mismatch";
+      await expect(
+        inspectStewardCoreRepair({
+          expectedSchema: "steward",
+          client: client as unknown as StewardCoreRepairClient,
+        }),
+      ).rejects.toThrow(expectedError);
+      await expect(
+        runStewardCoreRepair({
+          expectedSchema: "steward",
+          client: client as unknown as StewardCoreRepairClient,
+        }),
+      ).rejects.toThrow(expectedError);
+
+      const repairState = await client.unsafe<
+        { version_exists: boolean; new_relation_exists: boolean; ledger_exists: boolean }[]
+      >(`
+        SELECT
+          EXISTS (
+            SELECT 1 FROM pg_catalog.pg_attribute attribute
+            JOIN pg_catalog.pg_class relation ON relation.oid = attribute.attrelid
+            WHERE relation.oid = 'steward.execution_authorization_nonces'::regclass
+              AND attribute.attname = 'version'
+              AND attribute.attnum > 0 AND NOT attribute.attisdropped
+          ) AS version_exists,
+          pg_catalog.to_regclass('steward.provider_action_reservation_generations') IS NOT NULL
+            AS new_relation_exists,
+          pg_catalog.to_regclass('steward.${STEWARD_CORE_REPAIR_LEDGER}') IS NOT NULL
+            AS ledger_exists
+      `);
+      expect(repairState).toEqual([
+        { version_exists: false, new_relation_exists: false, ledger_exists: false },
+      ]);
+    } finally {
+      await client.end({ timeout: 5 });
+    }
+  });
+
+  test("rejects an enabled event trigger before reviewed repair DDL can run", async () => {
+    const { client } = await createFixture("steward");
+    try {
+      await client.unsafe(`
+        CREATE FUNCTION public.steward_repair_ledger_trigger_injector()
+        RETURNS event_trigger
+        LANGUAGE plpgsql
+        AS $$
+        DECLARE
+          ddl_command record;
+        BEGIN
+          FOR ddl_command IN SELECT * FROM pg_catalog.pg_event_trigger_ddl_commands()
+          LOOP
+            IF ddl_command.command_tag = 'CREATE TABLE'
+              AND ddl_command.object_identity =
+                'steward.${STEWARD_CORE_REPAIR_LEDGER}'
+            THEN
+              EXECUTE 'CREATE TRIGGER steward_repair_ledger_injected_trigger
+                BEFORE UPDATE ON steward.agents
+                FOR EACH ROW
+                EXECUTE FUNCTION steward.steward_provider_action_binding_guard()';
+            END IF;
+          END LOOP;
+        END
+        $$;
+        CREATE EVENT TRIGGER steward_repair_ledger_trigger_injector
+        ON ddl_command_end
+        WHEN TAG IN ('CREATE TABLE')
+        EXECUTE FUNCTION public.steward_repair_ledger_trigger_injector();
+      `);
+
+      const expectedError = "core-repair database contains an enabled event trigger";
+      await expect(
+        inspectStewardCoreRepair({
+          expectedSchema: "steward",
+          client: client as unknown as StewardCoreRepairClient,
+        }),
+      ).rejects.toThrow(expectedError);
+      await expect(
+        runStewardCoreRepair({
+          expectedSchema: "steward",
+          client: client as unknown as StewardCoreRepairClient,
+        }),
+      ).rejects.toThrow(expectedError);
+
+      const repairState = await client.unsafe<
+        {
+          version_exists: boolean;
+          new_relation_exists: boolean;
+          ledger_exists: boolean;
+          injected_trigger_exists: boolean;
+        }[]
+      >(`
+        SELECT
+          EXISTS (
+            SELECT 1 FROM pg_catalog.pg_attribute attribute
+            JOIN pg_catalog.pg_class relation ON relation.oid = attribute.attrelid
+            WHERE relation.oid = 'steward.execution_authorization_nonces'::regclass
+              AND attribute.attname = 'version'
+              AND attribute.attnum > 0 AND NOT attribute.attisdropped
+          ) AS version_exists,
+          pg_catalog.to_regclass('steward.provider_action_reservation_generations') IS NOT NULL
+            AS new_relation_exists,
+          pg_catalog.to_regclass('steward.${STEWARD_CORE_REPAIR_LEDGER}') IS NOT NULL
+            AS ledger_exists,
+          EXISTS (
+            SELECT 1
+            FROM pg_catalog.pg_trigger trigger_record
+            WHERE trigger_record.tgrelid = 'steward.agents'::regclass
+              AND trigger_record.tgname = 'steward_repair_ledger_injected_trigger'
+              AND NOT trigger_record.tgisinternal
+          ) AS injected_trigger_exists
+      `);
+      expect(repairState).toEqual([
+        {
+          version_exists: false,
+          new_relation_exists: false,
+          ledger_exists: false,
+          injected_trigger_exists: false,
+        },
+      ]);
+    } finally {
+      await client.end({ timeout: 5 });
+    }
+  });
+
+  test("rejects a runtime-owned bound trigger function body after repair", async () => {
+    const { client } = await createFixture("steward");
+    try {
+      const first = await runStewardCoreRepair({
+        expectedSchema: "steward",
+        client: client as unknown as StewardCoreRepairClient,
+      });
+      expect(first.status).toBe("applied");
+
+      await client.unsafe(`
+        CREATE OR REPLACE FUNCTION steward.steward_reject_provider_scope_move()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+          RETURN NEW;
+        END
+        $$;
+      `);
+
+      await expect(
+        runStewardCoreRepair({
+          expectedSchema: "steward",
+          client: client as unknown as StewardCoreRepairClient,
+        }),
+      ).rejects.toThrow("already-applied bound-trigger-function exact catalog envelope mismatch");
+      await expect(
+        inspectStewardCoreRepair({
+          expectedSchema: "steward",
+          client: client as unknown as StewardCoreRepairClient,
+        }),
+      ).rejects.toThrow("already-applied bound-trigger-function exact catalog envelope mismatch");
+      await expect(
+        inspectStewardReleaseReadiness({
+          expectedSchema: "steward",
+          client: client as unknown as StewardReleaseReadinessClient,
+        }),
+      ).rejects.toThrow("release-readiness bound-trigger-function exact catalog envelope mismatch");
+    } finally {
+      await client.end({ timeout: 5 });
+    }
+  });
+
   for (const defaultPrivilege of ["table", "function"] as const) {
     test(`rolls back the repair when runtime default ${defaultPrivilege} privileges grant new objects to a third party`, async () => {
       const { client } = await createFixture("steward");
@@ -899,6 +1301,43 @@ postgresDescribe("Steward production core repair on disposable PostgreSQL", () =
           verifiedExisting: ["0083_provider_approval_quorum"],
           preflight: null,
         });
+
+        await client.unsafe(`
+          CREATE FUNCTION ${quotedSchema}.steward_repair_post_unreviewed_trigger()
+          RETURNS trigger
+          LANGUAGE plpgsql
+          AS $$
+          BEGIN
+            RETURN NEW;
+          END
+          $$;
+          CREATE TRIGGER steward_repair_post_unreviewed_trigger
+          BEFORE UPDATE ON ${quotedSchema}.agents
+          FOR EACH ROW
+          EXECUTE FUNCTION ${quotedSchema}.steward_repair_post_unreviewed_trigger();
+        `);
+        await expect(
+          runStewardCoreRepair({
+            expectedSchema: schema,
+            client: client as unknown as StewardCoreRepairClient,
+          }),
+        ).rejects.toThrow("already-applied noninternal-trigger exact catalog envelope mismatch");
+        await expect(
+          inspectStewardCoreRepair({
+            expectedSchema: schema,
+            client: client as unknown as StewardCoreRepairClient,
+          }),
+        ).rejects.toThrow("already-applied noninternal-trigger exact catalog envelope mismatch");
+        await expect(
+          inspectStewardReleaseReadiness({
+            expectedSchema: schema,
+            client: client as unknown as StewardReleaseReadinessClient,
+          }),
+        ).rejects.toThrow("release-readiness noninternal-trigger exact catalog envelope mismatch");
+        await client.unsafe(`
+          DROP TRIGGER steward_repair_post_unreviewed_trigger ON ${quotedSchema}.agents;
+          DROP FUNCTION ${quotedSchema}.steward_repair_post_unreviewed_trigger();
+        `);
 
         await runStewardSchemaMigrations({
           client: client as unknown as StewardSchemaMigrationClient,
