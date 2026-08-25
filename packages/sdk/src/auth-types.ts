@@ -171,8 +171,9 @@ export interface StewardEmailOtpResult {
 
 /**
  * Result of `verifyEmailOtp` — a short-lived, single-use grant proving
- * ownership of the email. Pass `emailGrant` to `addPasskey({ emailGrant })`
- * so a brand-new, signed-out user can register a passkey WITHOUT a session.
+ * ownership of the email. Pass `emailGrant` to
+ * `addPasskey(email, { emailGrant })` so a brand-new, signed-out user can
+ * register a passkey WITHOUT a session.
  */
 export interface StewardEmailGrantResult {
   ok: boolean;

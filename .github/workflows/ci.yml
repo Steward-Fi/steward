@@ -460,7 +460,10 @@ jobs:
 
     services:
       postgres:
-        image: postgres:16-alpine
+        # Production core-repair catalogs are PostgreSQL-major/minor sensitive.
+        # Keep this required lane on the exact production release used to
+        # generate and rehearse the checked-in manifest.
+        image: postgres:18.4-alpine
         env:
           POSTGRES_USER: steward
           POSTGRES_PASSWORD: steward_ci
@@ -494,6 +497,14 @@ jobs:
 
       - name: Run migrations
         run: bun packages/db/src/migrate.ts
+        env:
+          DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"
+
+      - name: Steward release repair and readiness proof (Postgres 18.4)
+        run: >-
+          bun test
+          ./packages/db/src/__tests__/steward-core-repair.test.ts
+          ./packages/db/src/__tests__/steward-schema-migrations.test.ts
         env:
           DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"
 
