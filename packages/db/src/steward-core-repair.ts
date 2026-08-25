@@ -826,6 +826,11 @@ async function applyInTransaction(
   assertExactCatalogDelta(before, after, manifest.changes);
   await installLedger(transaction, schema, sources, bundleHash);
   await assertLedger(transaction, schema, sources, bundleHash);
+  // Re-evaluate the closed ownership/ACL boundary after every reviewed DDL
+  // statement, including the provenance ledger. Runtime-role default
+  // privileges can attach third-party grants only when new objects are
+  // created, so the preflight trust check alone cannot detect them.
+  await assertTrustedRepairSchema(transaction, schema);
 
   return {
     status: "applied",

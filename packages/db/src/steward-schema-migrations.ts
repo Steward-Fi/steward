@@ -256,6 +256,160 @@ async function assertBootstrapRelations(
   }
 }
 
+type MigrationCatalogTrustRow = {
+  runtime_owns_schema: boolean;
+  unexpected_create_grant: boolean;
+  marker_count: string | number;
+  marker_is_table: boolean;
+  marker_owned_by_runtime: boolean;
+  unexpected_marker_relation_grant: boolean;
+  unexpected_marker_column_grant: boolean;
+  untrusted_required_relation_count: string | number;
+  unexpected_required_relation_grant: boolean;
+  unexpected_required_column_grant: boolean;
+};
+
+/**
+ * The owner-bound status function treats the target relations and release
+ * ledger as trusted inputs. Prove that trust directly from pg_catalog before
+ * using the ledger and again before committing any installation.
+ */
+async function assertMigrationCatalogTrust(
+  transaction: StewardSchemaMigrationExecutor,
+  schema: string,
+): Promise<void> {
+  const relationLiterals = REQUIRED_BOOTSTRAP_RELATIONS.map((relation) => `'${relation}'`).join(
+    ", ",
+  );
+  const rows = await transaction.unsafe<MigrationCatalogTrustRow>(
+    `
+      SELECT
+        (
+          namespace.nspowner = runtime_role.oid
+          OR (
+            namespace.nspowner = database_owner_role.oid
+            AND database.datdba = runtime_role.oid
+          )
+        ) AS runtime_owns_schema,
+        EXISTS (
+          SELECT 1
+          FROM pg_catalog.aclexplode(
+            COALESCE(namespace.nspacl, pg_catalog.acldefault('n', namespace.nspowner))
+          ) AS schema_acl
+          WHERE schema_acl.privilege_type = 'CREATE'
+            AND schema_acl.grantee NOT IN (namespace.nspowner, runtime_role.oid)
+        ) AS unexpected_create_grant,
+        (
+          SELECT count(*)
+          FROM pg_catalog.pg_class relation
+          WHERE relation.relnamespace = namespace.oid
+            AND relation.relname = $2
+        ) AS marker_count,
+        NOT EXISTS (
+          SELECT 1
+          FROM pg_catalog.pg_class relation
+          WHERE relation.relnamespace = namespace.oid
+            AND relation.relname = $2
+            AND relation.relkind <> 'r'
+        ) AS marker_is_table,
+        NOT EXISTS (
+          SELECT 1
+          FROM pg_catalog.pg_class relation
+          WHERE relation.relnamespace = namespace.oid
+            AND relation.relname = $2
+            AND relation.relowner <> runtime_role.oid
+        ) AS marker_owned_by_runtime,
+        EXISTS (
+          SELECT 1
+          FROM pg_catalog.pg_class relation
+          CROSS JOIN LATERAL pg_catalog.aclexplode(
+            COALESCE(relation.relacl, pg_catalog.acldefault('r', relation.relowner))
+          ) AS relation_acl
+          WHERE relation.relnamespace = namespace.oid
+            AND relation.relname = $2
+            AND relation_acl.grantee NOT IN (relation.relowner, runtime_role.oid)
+        ) AS unexpected_marker_relation_grant,
+        EXISTS (
+          SELECT 1
+          FROM pg_catalog.pg_attribute attribute
+          JOIN pg_catalog.pg_class relation ON relation.oid = attribute.attrelid
+          CROSS JOIN LATERAL pg_catalog.aclexplode(attribute.attacl) AS column_acl
+          WHERE relation.relnamespace = namespace.oid
+            AND relation.relname = $2
+            AND attribute.attnum > 0
+            AND NOT attribute.attisdropped
+            AND column_acl.grantee NOT IN (relation.relowner, runtime_role.oid)
+        ) AS unexpected_marker_column_grant,
+        (
+          SELECT count(*)
+          FROM pg_catalog.pg_class relation
+          WHERE relation.relnamespace = namespace.oid
+            AND relation.relname IN (${relationLiterals})
+            AND (relation.relkind NOT IN ('r', 'p') OR relation.relowner <> runtime_role.oid)
+        ) AS untrusted_required_relation_count,
+        EXISTS (
+          SELECT 1
+          FROM pg_catalog.pg_class relation
+          CROSS JOIN LATERAL pg_catalog.aclexplode(
+            COALESCE(relation.relacl, pg_catalog.acldefault('r', relation.relowner))
+          ) AS relation_acl
+          WHERE relation.relnamespace = namespace.oid
+            AND relation.relname IN (${relationLiterals})
+            AND relation_acl.grantee NOT IN (relation.relowner, runtime_role.oid)
+        ) AS unexpected_required_relation_grant,
+        EXISTS (
+          SELECT 1
+          FROM pg_catalog.pg_attribute attribute
+          JOIN pg_catalog.pg_class relation ON relation.oid = attribute.attrelid
+          CROSS JOIN LATERAL pg_catalog.aclexplode(attribute.attacl) AS column_acl
+          WHERE relation.relnamespace = namespace.oid
+            AND relation.relname IN (${relationLiterals})
+            AND attribute.attnum > 0
+            AND NOT attribute.attisdropped
+            AND column_acl.grantee NOT IN (relation.relowner, runtime_role.oid)
+        ) AS unexpected_required_column_grant
+      FROM pg_catalog.pg_namespace namespace
+      JOIN pg_catalog.pg_database database
+        ON database.datname = pg_catalog.current_database()
+      JOIN pg_catalog.pg_roles runtime_role
+        ON runtime_role.rolname = current_user
+      JOIN pg_catalog.pg_roles database_owner_role
+        ON database_owner_role.rolname = 'pg_database_owner'
+      WHERE namespace.nspname = $1
+    `,
+    [schema, STEWARD_SCHEMA_MIGRATIONS_TABLE],
+  );
+  const trust = rows[0];
+  if (!trust || trust.runtime_owns_schema !== true) {
+    throw new Error(`Steward schema ${schema} is not owned by the effective migration role`);
+  }
+  if (trust.unexpected_create_grant === true) {
+    throw new Error(`Steward schema ${schema} grants CREATE to an unreviewed role`);
+  }
+  if (
+    Number(trust.marker_count) !== 1 ||
+    trust.marker_is_table !== true ||
+    trust.marker_owned_by_runtime !== true
+  ) {
+    throw new Error(`Steward release migration marker in ${schema} is not an owner-bound table`);
+  }
+  if (
+    trust.unexpected_marker_relation_grant === true ||
+    trust.unexpected_marker_column_grant === true
+  ) {
+    throw new Error(`Steward release migration marker in ${schema} grants unsafe privileges`);
+  }
+  if (Number(trust.untrusted_required_relation_count) !== 0) {
+    throw new Error(`Steward schema ${schema} contains untrusted bootstrap relations`);
+  }
+  if (
+    trust.unexpected_required_relation_grant === true ||
+    trust.unexpected_required_column_grant === true
+  ) {
+    throw new Error(`Steward schema ${schema} bootstrap relations grant unsafe privileges`);
+  }
+}
+
 function validateAppliedMarkers(
   rows: AppliedMarker[],
   expectations: StewardSchemaMigrationExpectation[],
@@ -610,6 +764,7 @@ async function applyInTransaction(
       applied_at timestamptz NOT NULL DEFAULT clock_timestamp()
     )
   `);
+  await assertMigrationCatalogTrust(transaction, schema);
 
   const rows = await transaction.unsafe<AppliedMarker>(`
     SELECT migration_order, tag, hash, created_at
@@ -625,6 +780,8 @@ async function applyInTransaction(
       );
     }
     await installStatusFunction(transaction, schema);
+    await assertBootstrapFunctionCatalog(transaction, schema);
+    await assertMigrationCatalogTrust(transaction, schema);
     return { applied: [], schema };
   }
 
@@ -653,6 +810,8 @@ async function applyInTransaction(
     applied.push(expectation.tag);
   }
   await installStatusFunction(transaction, schema);
+  await assertBootstrapFunctionCatalog(transaction, schema);
+  await assertMigrationCatalogTrust(transaction, schema);
   return { applied, schema };
 }
 
@@ -666,6 +825,7 @@ async function inspectInTransaction(
 
   const schema = await resolveDataSchema(transaction, expectedSchema);
   await assertBootstrapRelations(transaction, schema);
+  await assertMigrationCatalogTrust(transaction, schema);
   await assertBootstrapFunctionCatalog(transaction, schema);
   const rows = await transaction.unsafe<AppliedMarker>(
     `SELECT migration_order, tag, hash, created_at

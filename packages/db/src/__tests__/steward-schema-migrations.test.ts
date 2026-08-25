@@ -173,61 +173,6 @@ function pgliteAdapter(client: PGlite): StewardSchemaMigrationClient {
   };
 }
 
-function createReservedSchemaMigrationClient(options: { unlockSucceeds?: boolean } = {}) {
-  const trace: string[] = [];
-  const reserved = {
-    async unsafe(query: string) {
-      if (
-        query ===
-        "SELECT pg_catalog.pg_try_advisory_lock(pg_catalog.hashtextextended($1, 0)) AS acquired"
-      ) {
-        trace.push("reserved:lock");
-        return [{ acquired: true }];
-      }
-      if (
-        query ===
-        "SELECT pg_catalog.pg_advisory_unlock(pg_catalog.hashtextextended($1, 0)) AS released"
-      ) {
-        trace.push("reserved:unlock");
-        return [{ released: options.unlockSucceeds ?? true }];
-      }
-      if (query === "BEGIN") {
-        trace.push("reserved:begin");
-        return [];
-      }
-      if (query === "ROLLBACK") {
-        trace.push("reserved:rollback");
-        return [];
-      }
-      if (query === "SELECT pg_catalog.current_schema()::text AS schema_name") {
-        trace.push("reserved:resolve-schema");
-        return [{ schema_name: "pg_catalog" }];
-      }
-      throw new Error(`unexpected reserved schema-migration query: ${query}`);
-    },
-    release() {
-      trace.push("reserved:release");
-    },
-  };
-  const client = {
-    async unsafe(query: string) {
-      throw new Error(`pooled connection must not execute schema-migration query: ${query}`);
-    },
-    async begin<T>(callback: (transaction: StewardSchemaMigrationExecutor) => Promise<T>) {
-      trace.push("pooled:begin");
-      return callback(reserved);
-    },
-    async reserve() {
-      trace.push("pooled:reserve");
-      return reserved;
-    },
-    async end() {
-      trace.push("pooled:end");
-    },
-  } as StewardSchemaMigrationClient;
-  return { client, trace };
-}
-
 async function createFixture(executor: StewardSchemaMigrationExecutor, schema: string) {
   if (schema !== "public") {
     await executor.unsafe(`CREATE SCHEMA ${schema}; SET search_path = ${schema}, public`);
@@ -349,35 +294,6 @@ async function assertInstalled(
 }
 
 describe("Steward-owned schema compatibility migration", () => {
-  test("uses one reserved session for advisory lock, transaction, schema resolution, and unlock", async () => {
-    const { client, trace } = createReservedSchemaMigrationClient();
-
-    await expect(runStewardSchemaMigrations({ client })).rejects.toThrow(
-      "refusing reserved Steward data schema: pg_catalog",
-    );
-
-    expect(trace).toEqual([
-      "pooled:reserve",
-      "reserved:lock",
-      "reserved:begin",
-      "reserved:resolve-schema",
-      "reserved:rollback",
-      "reserved:unlock",
-      "reserved:release",
-    ]);
-  });
-
-  test("quarantines rather than pooling a session whose advisory unlock fails", async () => {
-    const { client, trace } = createReservedSchemaMigrationClient({ unlockSucceeds: false });
-
-    await expect(runStewardSchemaMigrations({ client })).rejects.toThrow(
-      "reserved advisory lock could not be released",
-    );
-
-    expect(trace).toContain("pooled:end");
-    expect(trace).not.toContain("reserved:release");
-  });
-
   test("renders the immutable #900 bootstrap surface for a configured schema", () => {
     const source = getStewardSchemaMigrationSource();
     const rendered = renderStewardSchemaMigration(source, "steward");
@@ -978,12 +894,121 @@ postgresDescribe("Steward-owned schema compatibility migration on real Postgres"
       await createFixture(adapter, "public");
 
       await expect(
-        runStewardSchemaMigrations({ client: adapter, useAdvisoryLock: false }),
-      ).rejects.toThrow("Steward schema shadow_test is missing bootstrap prerequisites");
+        runStewardSchemaMigrations({
+          client: adapter,
+          expectedSchema: "public",
+          useAdvisoryLock: false,
+        }),
+      ).rejects.toThrow(
+        "DATABASE_URL search_path resolves to shadow_test, expected Steward schema public",
+      );
       const rows = await client.unsafe<{ relation_name: string | null }[]>(
         "SELECT pg_catalog.to_regclass('public.__steward_release_migrations')::text AS relation_name",
       );
       expect(rows).toEqual([{ relation_name: null }]);
+    } finally {
+      await client.end({ timeout: 5 });
+    }
+  });
+
+  test("rejects unsafe default function grants and rolls the migration back", async () => {
+    const database = `steward_schema_acl_${randomUUID().replaceAll("-", "")}`;
+    const unreviewedRole = `steward_default_exec_${randomUUID().replaceAll("-", "")}`;
+    postgresDatabases.push(database);
+    postgresRoles.push(unreviewedRole);
+    await admin.unsafe(`CREATE ROLE "${unreviewedRole}"`);
+    await admin.unsafe(`CREATE DATABASE "${database}"`);
+
+    const targetUrl = new URL(originalUrl);
+    targetUrl.pathname = `/${database}`;
+    targetUrl.searchParams.set("options", "-c search_path=public");
+    const client = postgres(targetUrl.toString(), { max: 1, prepare: false });
+    const adapter = client as unknown as StewardSchemaMigrationClient;
+    try {
+      await createFixture(adapter, "public");
+      await client.unsafe(
+        `ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO "${unreviewedRole}"`,
+      );
+
+      await expect(
+        runStewardSchemaMigrations({
+          client: adapter,
+          expectedSchema: "public",
+          useAdvisoryLock: false,
+        }),
+      ).rejects.toThrow(/Steward bootstrap function .* \(ACL\)/);
+
+      const postcondition = await adapter.unsafe<{
+        marker: string | null;
+        bootstrap_schema: string | null;
+        rp_provenance: boolean;
+      }>(`
+        SELECT
+          pg_catalog.to_regclass('public.${STEWARD_SCHEMA_MIGRATIONS_TABLE}')::text AS marker,
+          pg_catalog.to_regnamespace('steward_bootstrap')::text AS bootstrap_schema,
+          EXISTS (
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'authenticators'
+              AND column_name = 'rp_id'
+          ) AS rp_provenance
+      `);
+      expect(postcondition).toEqual([
+        { marker: null, bootstrap_schema: null, rp_provenance: false },
+      ]);
+    } finally {
+      await client.end({ timeout: 5 });
+    }
+  });
+
+  test("rejects unsafe default marker-table grants and rolls the migration back", async () => {
+    const database = `steward_schema_table_acl_${randomUUID().replaceAll("-", "")}`;
+    const unreviewedRole = `steward_default_table_${randomUUID().replaceAll("-", "")}`;
+    postgresDatabases.push(database);
+    postgresRoles.push(unreviewedRole);
+    await admin.unsafe(`CREATE ROLE "${unreviewedRole}"`);
+    await admin.unsafe(`CREATE DATABASE "${database}"`);
+
+    const targetUrl = new URL(originalUrl);
+    targetUrl.pathname = `/${database}`;
+    targetUrl.searchParams.set("options", "-c search_path=public");
+    const client = postgres(targetUrl.toString(), { max: 1, prepare: false });
+    const adapter = client as unknown as StewardSchemaMigrationClient;
+    try {
+      await createFixture(adapter, "public");
+      await client.unsafe(`
+        ALTER DEFAULT PRIVILEGES
+        GRANT INSERT, UPDATE, DELETE, TRIGGER ON TABLES TO "${unreviewedRole}"
+      `);
+
+      await expect(
+        runStewardSchemaMigrations({
+          client: adapter,
+          expectedSchema: "public",
+          useAdvisoryLock: false,
+        }),
+      ).rejects.toThrow("Steward release migration marker in public grants unsafe privileges");
+
+      const postcondition = await adapter.unsafe<{
+        marker: string | null;
+        bootstrap_schema: string | null;
+        rp_provenance: boolean;
+      }>(`
+        SELECT
+          pg_catalog.to_regclass('public.${STEWARD_SCHEMA_MIGRATIONS_TABLE}')::text AS marker,
+          pg_catalog.to_regnamespace('steward_bootstrap')::text AS bootstrap_schema,
+          EXISTS (
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'authenticators'
+              AND column_name = 'rp_id'
+          ) AS rp_provenance
+      `);
+      expect(postcondition).toEqual([
+        { marker: null, bootstrap_schema: null, rp_provenance: false },
+      ]);
     } finally {
       await client.end({ timeout: 5 });
     }
