@@ -169,6 +169,15 @@ async function buildSchemaManifest(
       await applySource(client as unknown as StewardCoreRepairExecutor, source, file);
     }
 
+    // Reproduce the exact production discontinuity: the nonce counter already
+    // uses its historical unique index as replica identity, while the inflight
+    // table still has the default (and therefore unusable) identity.
+    const quotedSchema = quoteStewardCoreRepairIdentifier(schema);
+    await client.unsafe(`
+      ALTER TABLE ${quotedSchema}."evm_wallet_nonces"
+        REPLICA IDENTITY USING INDEX "evm_wallet_nonces_wallet_chain_idx"
+    `);
+
     const before0083 = await queryStewardCatalog(
       client as unknown as StewardCoreRepairExecutor,
       schema,

@@ -198,32 +198,32 @@
           }
         ],
         "beforeHash": "89f3d3d0c64fb982ad4e798468afdfd4f484fa232fd919b12e078456e837e995",
-        "afterHash": "5825061f06ab2f0a144a4253bc8c1e90d99ecd085885aa413f27ab8da9bb2cbe",
-        "deltaHash": "9e3fd58e0e0072289dfaf8c4c63b1724011b825850b664ce6c0b6434a006e703"
+        "afterHash": "2d92900d1f8a0064f5497367b01f8b2e35c642e8f1b9d5d683dc92ca239843fd",
+        "deltaHash": "295f7f5f23f6425df141b2f74cc3b91a5cf8096eb0b3a868ce75bf82272e6433"
       },
       "changes0082": {
         "keyCount": 47,
         "beforeHash": "b97bd85ebb84276ea663d5c12f290ef3899c99aee838ea7880f624b04c768ae2",
-        "afterHash": "254427814e9a207954c38305719b73ea1c5a5b582ac375404b072f5aa88c4c0b",
-        "deltaHash": "87c49b9e215c9347e6e96d08ce51641b42dc1f10d056a5d86a481df01d646d9f"
+        "afterHash": "dd8686baaaacdf91d58627965624289ecf579fb14d685c616dbd7797ac517e2f",
+        "deltaHash": "07b1ee7c7c98e3ddd4593e5bde6d19302b8eedb57b28b148fc5595dd0554ddf0"
       },
       "changes0084To0110": {
-        "keyCount": 347,
-        "beforeHash": "0387bd45a1934c9424d86a8cf4398ac11889c1b1698d884fc66782a2701fa661",
-        "afterHash": "e2d60ef1af4d349a00b16ae48198f8181bc49c681629d66d99f1c001434c7cd2",
-        "deltaHash": "8cdae0ef2b1d1c0e215356d19541447d9bd104e592e6a85e738309939cef4e41",
+        "keyCount": 348,
+        "beforeHash": "f740d47891375e4f1be174891a411863fd4c7eb2df2530c9157b68f309972a06",
+        "afterHash": "8d3e884beaff55f01d9401e2414c353962806ab4505981445272b04fa1b545ba",
+        "deltaHash": "7b06f533f850486379328660a5d1c4fa3b5399f23e65262e5544ca050c4efb0b",
         "semanticFinalCounts": {
           "column": 152,
           "constraint": 70,
           "enum": 1,
           "function": 14,
           "index": 39,
-          "relation": 11,
+          "relation": 12,
           "trigger": 14
         }
       },
       "changes": {
-        "keyCount": 391,
+        "keyCount": 392,
         "keys": [
           {
             "kind": "column",
@@ -1703,6 +1703,10 @@
           },
           {
             "kind": "relation",
+            "objectName": "evm_wallet_nonce_inflight"
+          },
+          {
+            "kind": "relation",
             "objectName": "evm_wallet_nonce_owners"
           },
           {
@@ -1790,9 +1794,9 @@
             "objectName": "workspaces.workspaces_delete_authority_guard"
           }
         ],
-        "beforeHash": "135a7ff58f69a3763aa99146325b102b3c53ab13d70ca793c50bb71feee76ee5",
-        "afterHash": "0490c681edd3c2b9617bbc56790dcb2f9980a7dd9149b4b13cea6c02e9bfa185",
-        "deltaHash": "f3c13ee3bc4e3df269e8b97f04e10dbd5ab0466c491639d331d6dd86bc1e77cf"
+        "beforeHash": "60b8302f4af0d6d44797906f98b9e03099d7e750a5affa401364bca51ee580f5",
+        "afterHash": "bd5598e76cd0e2d1fd87bca53ddb101ee9a30b784c4f9a623d08bf232d323929",
+        "deltaHash": "0e55e57bdd61ec7ad78617a20727bf0b644f20e2d040607c0dd8703b266360c1"
       },
       "nonInternalTriggers": {
         "before": {
@@ -2243,32 +2247,32 @@
           }
         ],
         "beforeHash": "89f3d3d0c64fb982ad4e798468afdfd4f484fa232fd919b12e078456e837e995",
-        "afterHash": "5825061f06ab2f0a144a4253bc8c1e90d99ecd085885aa413f27ab8da9bb2cbe",
-        "deltaHash": "9e3fd58e0e0072289dfaf8c4c63b1724011b825850b664ce6c0b6434a006e703"
+        "afterHash": "2d92900d1f8a0064f5497367b01f8b2e35c642e8f1b9d5d683dc92ca239843fd",
+        "deltaHash": "295f7f5f23f6425df141b2f74cc3b91a5cf8096eb0b3a868ce75bf82272e6433"
       },
       "changes0082": {
         "keyCount": 47,
         "beforeHash": "5e15e9f28bbf255a3d838b79c8ff88c0beb3ee3ecc1789145fff5ce76f9fc01e",
-        "afterHash": "44f3941e9301f70cafbea65fba1a566e4169429f7da4685e972b767369a4d04a",
-        "deltaHash": "19ee56358cd987faf7ee3bbbb8ecae60cb71c14503a098c473d88ab9ee432fcb"
+        "afterHash": "e65ed41b74b3d307125edb7e7068d77a874f1856ff77f445c1540b064108141b",
+        "deltaHash": "95465fbe9330d04c531783a5f1de4b0845d405a11ad7a42488d056841d9fcb77"
       },
       "changes0084To0110": {
-        "keyCount": 347,
-        "beforeHash": "72524af7c14159b295cff184197df932cd127767cfab46c264ffc0085128a887",
-        "afterHash": "dd9f95b25d278019fc8d60d41a1521c7986adfef2f38663ad05bdc0ce384bd95",
-        "deltaHash": "ca1dc342db7d9ac1e4a36fb07bfdab5c8b968dc1bb99e5293ca462944677148a",
+        "keyCount": 348,
+        "beforeHash": "121a43c6e387994773ba86207b253498b6d3892ee33130133ecce9f51243d86d",
+        "afterHash": "cd296c7243707ddb04227147ab8df36ea35399b8adc651709b90f3ce22276c06",
+        "deltaHash": "5f80ea880f05b764030409503a50a1486f3420407761d6a5919d95553560ba44",
         "semanticFinalCounts": {
           "column": 152,
           "constraint": 70,
           "enum": 1,
           "function": 14,
           "index": 39,
-          "relation": 11,
+          "relation": 12,
           "trigger": 14
         }
       },
       "changes": {
-        "keyCount": 391,
+        "keyCount": 392,
         "keys": [
           {
             "kind": "column",
@@ -3748,6 +3752,10 @@
           },
           {
             "kind": "relation",
+            "objectName": "evm_wallet_nonce_inflight"
+          },
+          {
+            "kind": "relation",
             "objectName": "evm_wallet_nonce_owners"
           },
           {
@@ -3835,9 +3843,9 @@
             "objectName": "workspaces.workspaces_delete_authority_guard"
           }
         ],
-        "beforeHash": "035498eccc09214ddae1c244a2a8ac9e6da42432578dea28d0b13a3147cc177f",
-        "afterHash": "967aa5d1b2d483eee7044285091e55120df1a30881ec29df332b08f86e88832a",
-        "deltaHash": "5190cf00d789e8ef252197d5c946ffac1b4b31ea626ad4bc10a4bbf476402919"
+        "beforeHash": "46afafd48fd26868569204da7950e5071782abb281b9ed91fee24bd3fffb639b",
+        "afterHash": "fe617c107d0cd92ed63a173f34705fb90c417684cb740baf8183b4d7c757915c",
+        "deltaHash": "51c507548bb76f6f51b08aed825f35edb6380a501ba9d8fbfb661b85162acb98"
       },
       "nonInternalTriggers": {
         "before": {

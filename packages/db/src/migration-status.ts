@@ -63,6 +63,13 @@ function isStrictlyForward(entries: readonly MigrationLedgerEntry[]): boolean {
   );
 }
 
+function sameMigrationPrefix(
+  entries: readonly MigrationLedgerEntry[],
+  expected: readonly MigrationLedgerEntry[],
+): boolean {
+  return entries.every((entry, index) => expected[index] && sameMigration(entry, expected[index]));
+}
+
 /**
  * Validate the applied core migration ledger against the migrations required by
  * this release. Required migrations must be present with their exact hash and
@@ -103,10 +110,10 @@ export function assessMigrationLedger(
   const hasDuplicateCreatedAt = [normalizedApplied, normalizedRequired, normalizedKnown].some(
     (entries) => new Set(entries.map((entry) => entry.createdAt)).size !== entries.length,
   );
-  const hasNonForwardOrder = [normalizedApplied, normalizedRequired, normalizedKnown].some(
-    (entries) => !isStrictlyForward(entries),
-  );
-  if (hasDuplicateCreatedAt || hasNonForwardOrder) {
+  if (
+    hasDuplicateCreatedAt ||
+    !sameMigrationPrefix(normalizedRequired, normalizedKnown.slice(0, normalizedRequired.length))
+  ) {
     return { ok: false, state: "corrupt", ...base };
   }
 
@@ -114,14 +121,13 @@ export function assessMigrationLedger(
     (entry, index) => !normalizedApplied[index] || !sameMigration(normalizedApplied[index], entry),
   );
   if (missingRequired) {
-    const onlyValidKnownPrefix = normalizedApplied.every(
-      (entry, index) => normalizedKnown[index] && sameMigration(entry, normalizedKnown[index]),
-    );
-    const actualTip = Math.max(0, ...normalizedApplied.map((entry) => entry.createdAt));
-    const requiredTip = Math.max(...normalizedRequired.map((entry) => entry.createdAt));
+    const onlyValidKnownPrefix = sameMigrationPrefix(normalizedApplied, normalizedKnown);
     return {
       ok: false,
-      state: onlyValidKnownPrefix && actualTip < requiredTip ? "behind" : "corrupt",
+      state:
+        onlyValidKnownPrefix && normalizedApplied.length < normalizedRequired.length
+          ? "behind"
+          : "corrupt",
       ...base,
     };
   }
@@ -130,16 +136,19 @@ export function assessMigrationLedger(
     return { ok: true, state: "exact", ...base };
   }
 
-  const knownByCreatedAt = new Map(
-    normalizedKnown.map((entry) => [entry.createdAt, entry] as const),
-  );
   const forwardEntries = normalizedApplied.slice(normalizedRequired.length);
-  const unknownForwardEntries = forwardEntries.filter((entry) => {
-    const knownEntry = knownByCreatedAt.get(entry.createdAt);
-    return knownEntry === undefined || !sameMigration(entry, knownEntry);
-  });
-  const requiredTip = Math.max(...normalizedRequired.map((entry) => entry.createdAt));
-  if (unknownForwardEntries.some((entry) => entry.createdAt <= requiredTip)) {
+  const knownForwardEntries = normalizedKnown.slice(normalizedRequired.length);
+  const knownForwardCount = Math.min(forwardEntries.length, knownForwardEntries.length);
+  if (!sameMigrationPrefix(forwardEntries.slice(0, knownForwardCount), knownForwardEntries)) {
+    return { ok: false, state: "corrupt", ...base };
+  }
+  const unknownForwardEntries = forwardEntries.slice(knownForwardCount);
+  const trustedPrefix = normalizedApplied.slice(0, normalizedRequired.length + knownForwardCount);
+  const trustedTip = Math.max(...trustedPrefix.map((entry) => entry.createdAt));
+  if (
+    unknownForwardEntries.length > 0 &&
+    (unknownForwardEntries[0].createdAt <= trustedTip || !isStrictlyForward(unknownForwardEntries))
+  ) {
     return { ok: false, state: "corrupt", ...base };
   }
   return {
