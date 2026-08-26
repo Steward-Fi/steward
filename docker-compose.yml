@@ -168,7 +168,7 @@ services:
       - "/scripts/postgres/rls-activate.sql"
     restart: "no"
     environment:
-      PGDATABASE: "${STEWARD_ADMIN_DATABASE_URL:?STEWARD_ADMIN_DATABASE_URL must be set}"
+      PGDATABASE: "${MIGRATION_DATABASE_URL:?MIGRATION_DATABASE_URL must be set}"
     volumes:
       - ./scripts/postgres:/scripts/postgres:ro
     depends_on:

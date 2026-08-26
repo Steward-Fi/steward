@@ -527,6 +527,12 @@ describe("SEC-169 production Compose uses the restricted RLS runtime role", () =
         "steward-rls-bootstrap-final:",
       );
       expect(serviceBlock(compose, "steward-rls-activate")).toContain("steward-rls-upgrade-final:");
+      expect(serviceBlock(compose, "steward-rls-activate")).toContain(
+        'PGDATABASE: "${MIGRATION_DATABASE_URL:?',
+      );
+      expect(serviceBlock(compose, "steward-rls-activate")).not.toContain(
+        "STEWARD_ADMIN_DATABASE_URL",
+      );
     }
   });
 
