@@ -722,6 +722,10 @@ async function isExactLegacyCapabilityGrantsShape(db: MigrationQueryExecutor): P
         FROM legacy_relation relation
         JOIN pg_constraint constraint_inventory
           ON constraint_inventory.conrelid = relation.oid
+          -- PostgreSQL 18 exposes column NOT NULL state as contype = 'n'
+          -- catalog constraints. Column definitions are verified separately;
+          -- keep this relation-level inventory stable across PG 16 and 18.
+          AND constraint_inventory.contype <> 'n'
       ),
       legacy_indexes AS (
         SELECT
