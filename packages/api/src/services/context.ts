@@ -366,11 +366,31 @@ export const db: DbHandle = new Proxy({} as DbHandle, {
 // sealed each key. MASTER_PASSWORD (captured at import) is the fallback when the
 // env var is transiently unset (e.g. another file's afterAll deleted it).
 function activeVault(): Vault {
-  return getConfiguredVault({ fallbackPassword: MASTER_PASSWORD });
+  return getConfiguredVault();
 }
+const vaultMethodOverrides = new WeakMap<object, Map<PropertyKey, unknown>>();
+const vaultInstanceOverrides = new WeakMap<object, Vault>();
+
+/** Bind a complete Vault replacement to the active test database for one callback. */
+export async function _withVaultOverrideForTests<T>(
+  replacement: Vault,
+  callback: () => T | Promise<T>,
+): Promise<T> {
+  const database = getDb() as object;
+  vaultInstanceOverrides.set(database, replacement);
+  try {
+    return await callback();
+  } finally {
+    vaultInstanceOverrides.delete(database);
+  }
+}
+
 export const vault: Vault = new Proxy({} as Vault, {
   get(_target, property) {
-    const active = activeVault() as unknown as Record<PropertyKey, unknown>;
+    const overrides = vaultMethodOverrides.get(getDb() as object);
+    if (overrides?.has(property)) return overrides.get(property);
+    const active = (vaultInstanceOverrides.get(getDb() as object) ??
+      activeVault()) as unknown as Record<PropertyKey, unknown>;
     const value = active[property];
     return typeof value === "function"
       ? (value as (...args: unknown[]) => unknown).bind(active)
@@ -383,7 +403,13 @@ export const vault: Vault = new Proxy({} as Vault, {
   // the assignment would silently write to the empty Proxy target and the get
   // trap would keep returning the real method.
   set(_target, property, value) {
-    (activeVault() as unknown as Record<PropertyKey, unknown>)[property] = value;
+    const database = getDb() as object;
+    let overrides = vaultMethodOverrides.get(database);
+    if (!overrides) {
+      overrides = new Map();
+      vaultMethodOverrides.set(database, overrides);
+    }
+    overrides.set(property, value);
     return true;
   },
 });
@@ -405,9 +431,29 @@ export const tenantConfigs = new Map<string, TenantConfig>([
   [defaultTenantConfig.id, defaultTenantConfig],
 ]);
 
-export const defaultTenantReady = db.execute(sql`
-  SELECT steward_bootstrap.ensure_default_tenant(${process.env.STEWARD_DEFAULT_TENANT_KEY || ""})
-`);
+let defaultTenantDb: ReturnType<typeof getDb> | null = null;
+let defaultTenantReady: Promise<void> | null = null;
+
+/** Run tenant bootstrap only after the active database has completed migrations. */
+export function ensureDefaultTenantReady(): Promise<void> {
+  const activeDb = getDb();
+  if (activeDb !== defaultTenantDb) {
+    defaultTenantDb = activeDb;
+    defaultTenantReady = null;
+  }
+  if (!defaultTenantReady) {
+    const pending = activeDb
+      .execute(sql`
+        SELECT steward_bootstrap.ensure_default_tenant(${process.env.STEWARD_DEFAULT_TENANT_KEY || ""})
+      `)
+      .then(() => undefined);
+    defaultTenantReady = pending;
+    void pending.catch(() => {
+      if (defaultTenantReady === pending) defaultTenantReady = null;
+    });
+  }
+  return defaultTenantReady;
+}
 
 // ─── App variable types ───────────────────────────────────────────────────────
 
@@ -807,7 +853,7 @@ export async function tenantAuth(
   next: Next,
   options?: { requireTenantMatch?: string; bindTenantDatabase?: boolean },
 ) {
-  await defaultTenantReady;
+  await ensureDefaultTenantReady();
 
   const authHeader = c.req.header("Authorization");
   if (authHeader?.startsWith("Bearer ")) {
