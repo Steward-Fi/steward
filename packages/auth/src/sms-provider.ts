@@ -1,8 +1,13 @@
+/** Delivery transport selected for a provider-managed phone OTP challenge. */
+export type ManagedOtpDeliveryChannel = "sms" | "whatsapp";
+
 /**
  * Pluggable SMS provider interface. Implementations send a short text body
  * to an E.164-formatted phone number.
  */
 export interface SmsProvider {
+  /** Defaults to SMS-only; test doubles may explicitly emulate other channels. */
+  readonly otpDeliveryChannels?: readonly ManagedOtpDeliveryChannel[];
   send(to: string, body: string): Promise<void>;
 }
 
@@ -23,8 +28,8 @@ export interface ManagedSmsOtpProvider {
    * bounded send and a bounded check window, and clock skew.
    */
   readonly reservationTtlMs: number;
-  /** Starts or resends a challenge and returns its authoritative expiry. */
-  send(to: string): Promise<{ expiresAt: Date }>;
+  /** Starts or resends a challenge on the explicit transport. */
+  send(to: string, channel: ManagedOtpDeliveryChannel): Promise<{ expiresAt: Date }>;
   verify(to: string, code: string): Promise<boolean>;
 }
 
@@ -202,7 +207,7 @@ export class TwilioVerifyProvider implements ManagedSmsOtpProvider {
     this.reservationTtlMs = this.challengeTtlMs + 2 * this.operationLockTtlMs;
   }
 
-  async send(to: string): Promise<{ expiresAt: Date }> {
+  async send(to: string, channel: ManagedOtpDeliveryChannel): Promise<{ expiresAt: Date }> {
     let response: Response;
     try {
       response = await fetch(
@@ -213,7 +218,7 @@ export class TwilioVerifyProvider implements ManagedSmsOtpProvider {
             Authorization: `Basic ${btoa(`${this.accountSid}:${this.authToken}`)}`,
             "Content-Type": "application/x-www-form-urlencoded",
           },
-          body: new URLSearchParams({ To: to, Channel: "sms" }).toString(),
+          body: new URLSearchParams({ To: to, Channel: channel }).toString(),
           signal: AbortSignal.timeout(this.requestTimeoutMs),
         },
       );
@@ -314,6 +319,8 @@ class MockSmsInboxRegistry {
 export const MockSmsInbox = new MockSmsInboxRegistry();
 
 export class MockSmsProvider implements SmsProvider {
+  readonly otpDeliveryChannels = ["sms", "whatsapp"] as const;
+
   async send(to: string, body: string): Promise<void> {
     MockSmsInbox.push({ to, body, sentAt: new Date(), code: body.match(OTP_RE)?.[1] });
   }

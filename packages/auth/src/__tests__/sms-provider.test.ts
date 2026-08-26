@@ -112,7 +112,7 @@ describe("TwilioVerifyProvider", () => {
       );
     }) as typeof fetch;
 
-    const delivery = await VERIFY_PROVIDER.send("+14155550999");
+    const delivery = await VERIFY_PROVIDER.send("+14155550999", "sms");
 
     expect(requestUrl).toBe(
       `https://verify.twilio.com/v2/Services/${VERIFY_SERVICE_SID}/Verifications`,
@@ -126,6 +126,24 @@ describe("TwilioVerifyProvider", () => {
     expect(VERIFY_PROVIDER.challengeTtlMs).toBe(10 * 60 * 1000);
     expect(VERIFY_PROVIDER.operationLockTtlMs).toBe(20 * 1000);
     expect(VERIFY_PROVIDER.reservationTtlMs).toBe(10 * 60 * 1000 + 40 * 1000);
+  });
+
+  test("starts a WhatsApp verification on the requested channel", async () => {
+    let requestInit: RequestInit | undefined;
+    const createdAt = new Date(Date.now() - 1000);
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      requestInit = init;
+      return new Response(
+        JSON.stringify({ status: "pending", date_created: createdAt.toISOString() }),
+        { status: 201 },
+      );
+    }) as typeof fetch;
+
+    await VERIFY_PROVIDER.send("+14155550999", "whatsapp");
+
+    const body = new URLSearchParams(String(requestInit?.body));
+    expect(body.get("To")).toBe("+14155550999");
+    expect(body.get("Channel")).toBe("whatsapp");
   });
 
   test("uses the authoritative status even when the deprecated valid field is absent", async () => {
@@ -148,8 +166,8 @@ describe("TwilioVerifyProvider", () => {
         status: 201,
       })) as typeof fetch;
 
-    const first = await VERIFY_PROVIDER.send("+14155550999");
-    const resent = await VERIFY_PROVIDER.send("+14155550999");
+    const first = await VERIFY_PROVIDER.send("+14155550999", "sms");
+    const resent = await VERIFY_PROVIDER.send("+14155550999", "sms");
     expect(resent.expiresAt).toEqual(first.expiresAt);
     expect(first.expiresAt.getTime()).toBe(createdAt.getTime() + 10 * 60 * 1000);
   });
@@ -197,7 +215,7 @@ describe("TwilioVerifyProvider", () => {
         status: 201,
       })) as typeof fetch;
 
-    await expect(VERIFY_PROVIDER.send("+14155550999")).rejects.toThrow(SmsDeliveryError);
+    await expect(VERIFY_PROVIDER.send("+14155550999", "sms")).rejects.toThrow(SmsDeliveryError);
   });
 
   test("treats a missing or expired verification as an invalid code", async () => {
@@ -219,7 +237,7 @@ describe("TwilioVerifyProvider", () => {
       return new Response(TWILIO_ERROR_BODY, { status: isCheck ? 503 : 400 });
     }) as typeof fetch;
 
-    const sendFailure = await VERIFY_PROVIDER.send("+14155550999").then(
+    const sendFailure = await VERIFY_PROVIDER.send("+14155550999", "sms").then(
       () => null,
       (error: unknown) => error,
     );
@@ -255,7 +273,7 @@ describe("TwilioVerifyProvider", () => {
       throw new Error("socket failed for +14155550999 with twilio-auth-token");
     }) as typeof fetch;
 
-    await expect(VERIFY_PROVIDER.send("+14155550999")).rejects.toThrow(SmsDeliveryError);
+    await expect(VERIFY_PROVIDER.send("+14155550999", "sms")).rejects.toThrow(SmsDeliveryError);
     await expect(VERIFY_PROVIDER.verify("+14155550999", "123456")).rejects.toThrow(
       SmsVerificationError,
     );
@@ -289,7 +307,7 @@ describe("TwilioVerifyProvider", () => {
         signal.addEventListener("abort", () => reject(signal.reason), { once: true });
       })) as typeof fetch;
 
-    await expect(provider.send("+14155550999")).rejects.toThrow(SmsDeliveryError);
+    await expect(provider.send("+14155550999", "sms")).rejects.toThrow(SmsDeliveryError);
     expect(warnings).toEqual(["[steward:auth] Twilio Verify send request failed"]);
     expect(provider.operationLockTtlMs).toBe(5 * 1000 + 5);
     expect(provider.reservationTtlMs).toBe(

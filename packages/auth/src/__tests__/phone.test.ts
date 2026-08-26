@@ -2,6 +2,7 @@ import { afterEach, describe, expect, setSystemTime, test } from "bun:test";
 
 import { isValidE164, PhoneAuth } from "../phone";
 import {
+  type ManagedOtpDeliveryChannel,
   type ManagedSmsOtpProvider,
   MockSmsInbox,
   MockSmsProvider,
@@ -21,6 +22,7 @@ class ManagedProviderDouble implements ManagedSmsOtpProvider {
   readonly reservationTtlMs = this.challengeTtlMs + 2 * this.operationLockTtlMs;
   readonly sends: string[] = [];
   readonly sendAttempts: string[] = [];
+  readonly sendChannels: ManagedOtpDeliveryChannel[] = [];
   readonly checks: Array<{ phone: string; code: string }> = [];
   rejectNextSend = false;
   rejectNextVerify = false;
@@ -28,8 +30,9 @@ class ManagedProviderDouble implements ManagedSmsOtpProvider {
   verifyHook?: () => Promise<void>;
   challengeExpiresAt: number | null = null;
 
-  async send(phone: string): Promise<{ expiresAt: Date }> {
+  async send(phone: string, channel: ManagedOtpDeliveryChannel): Promise<{ expiresAt: Date }> {
     this.sendAttempts.push(phone);
+    this.sendChannels.push(channel);
     await this.sendHook?.();
     if (this.rejectNextSend) {
       this.rejectNextSend = false;
@@ -121,7 +124,7 @@ describe("PhoneAuth", () => {
     const auth = makeAuth();
     try {
       const phone = "+14155551111";
-      await auth.sendOtp(phone);
+      await auth.sendOtp(phone, "login", "sms");
       const msg = MockSmsInbox.last(phone);
       expect(msg?.code).toMatch(/^\d{6}$/);
     } finally {
@@ -133,7 +136,7 @@ describe("PhoneAuth", () => {
     const auth = makeAuth();
     try {
       const phone = "+14155552222";
-      await auth.sendOtp(phone);
+      await auth.sendOtp(phone, "login", "sms");
       const code = MockSmsInbox.last(phone)!.code!;
       expect(await auth.verifyOtp(phone, code)).toEqual({ valid: true, phone });
       expect((await auth.verifyOtp(phone, code)).valid).toBe(false);
@@ -147,7 +150,7 @@ describe("PhoneAuth", () => {
     try {
       const a = "+14155553333";
       const b = "+14155554444";
-      await auth.sendOtp(a);
+      await auth.sendOtp(a, "login", "sms");
       const code = MockSmsInbox.last(a)!.code!;
       expect((await auth.verifyOtp(b, code)).valid).toBe(false);
       expect((await auth.verifyOtp(a, code)).valid).toBe(true);
@@ -160,7 +163,7 @@ describe("PhoneAuth", () => {
     const auth = makeAuth({ tokenTtlMs: 10 });
     try {
       const phone = "+14155555555";
-      await auth.sendOtp(phone);
+      await auth.sendOtp(phone, "login", "sms");
       const code = MockSmsInbox.last(phone)!.code!;
       await new Promise((r) => setTimeout(r, 30));
       expect((await auth.verifyOtp(phone, code)).valid).toBe(false);
@@ -172,7 +175,7 @@ describe("PhoneAuth", () => {
   test("sendOtp throws on non-E.164 phone", async () => {
     const auth = makeAuth();
     try {
-      await expect(auth.sendOtp("4155551234")).rejects.toThrow();
+      await expect(auth.sendOtp("4155551234", "login", "sms")).rejects.toThrow();
     } finally {
       auth.destroy();
     }
@@ -182,7 +185,7 @@ describe("PhoneAuth", () => {
     const auth = makeAuth();
     try {
       const phone = "+14155556666";
-      await auth.sendOtp(phone);
+      await auth.sendOtp(phone, "login", "sms");
       expect((await auth.verifyOtp(phone, "abcdef")).valid).toBe(false);
     } finally {
       auth.destroy();
@@ -194,7 +197,7 @@ describe("PhoneAuth", () => {
     const auth = new PhoneAuth({ managedProvider: provider });
     try {
       const phone = "+14155557777";
-      await auth.sendOtp(phone, "login:tenant-a");
+      await auth.sendOtp(phone, "login:tenant-a", "sms");
 
       expect(provider.sends).toEqual([phone]);
       expect(await auth.verifyOtp(phone, "000000", "login:tenant-a")).toEqual({
@@ -222,7 +225,7 @@ describe("PhoneAuth", () => {
     });
     try {
       const phone = "+14155557778";
-      await auth.sendOtp(phone, "login:tenant-a");
+      await auth.sendOtp(phone, "login:tenant-a", "sms");
 
       backend.failReads = true;
       await expect(auth.verifyOtp(phone, "123456", "login:tenant-a")).rejects.toBeInstanceOf(
@@ -244,15 +247,18 @@ describe("PhoneAuth", () => {
     }
   });
 
-  test("rejects a different purpose while a managed challenge is active", async () => {
+  test("keeps the per-phone purpose fence shared across SMS and WhatsApp", async () => {
     const provider = new ManagedProviderDouble();
     const auth = new PhoneAuth({ managedProvider: provider });
     try {
       const phone = "+14155558888";
-      await auth.sendOtp(phone, "login:tenant-a");
-      await expect(auth.sendOtp(phone, "mfa:enroll:user-a")).rejects.toThrow("already in progress");
+      await auth.sendOtp(phone, "login:tenant-a", "sms");
+      await expect(auth.sendOtp(phone, "whatsapp:login:tenant-a", "whatsapp")).rejects.toThrow(
+        "already in progress",
+      );
 
       expect(provider.sendAttempts).toEqual([phone]);
+      expect(provider.sendChannels).toEqual(["sms"]);
       expect(await auth.verifyOtp(phone, "123456", "login:tenant-a")).toEqual({
         valid: true,
         phone,
@@ -267,9 +273,9 @@ describe("PhoneAuth", () => {
     const auth = new PhoneAuth({ managedProvider: provider });
     try {
       const phone = "+14155559999";
-      const first = await auth.sendOtp(phone, "login:tenant-a");
+      const first = await auth.sendOtp(phone, "login:tenant-a", "sms");
       setSystemTime(new Date(Date.now() + 60 * 1000));
-      const resent = await auth.sendOtp(phone, "login:tenant-a");
+      const resent = await auth.sendOtp(phone, "login:tenant-a", "sms");
 
       expect(provider.sends).toEqual([phone, phone]);
       expect(resent.expiresAt).toEqual(first.expiresAt);
@@ -292,19 +298,23 @@ describe("PhoneAuth", () => {
     };
     try {
       const phone = "+14155559994";
-      const { expiresAt } = await auth.sendOtp(phone, "login:tenant-a");
+      const { expiresAt } = await auth.sendOtp(phone, "login:tenant-a", "sms");
       expect(expiresAt.getTime()).toBe(startedAt.getTime() + 20 * 1000 + provider.challengeTtlMs);
 
       setSystemTime(new Date(startedAt.getTime() + 5 * 60 * 1000 + 1));
-      await expect(auth.sendOtp(phone, "mfa:enroll:user-a")).rejects.toThrow("already in progress");
+      await expect(auth.sendOtp(phone, "mfa:enroll:user-a", "sms")).rejects.toThrow(
+        "already in progress",
+      );
 
       setSystemTime(new Date(expiresAt.getTime() - 1));
-      await expect(auth.sendOtp(phone, "mfa:enroll:user-a")).rejects.toThrow("already in progress");
+      await expect(auth.sendOtp(phone, "mfa:enroll:user-a", "sms")).rejects.toThrow(
+        "already in progress",
+      );
       expect(provider.sendAttempts).toEqual([phone]);
 
       provider.sendHook = undefined;
       setSystemTime(new Date(expiresAt.getTime() + provider.operationLockTtlMs + 1));
-      await auth.sendOtp(phone, "mfa:enroll:user-a");
+      await auth.sendOtp(phone, "mfa:enroll:user-a", "sms");
       expect(provider.sendAttempts).toEqual([phone, phone]);
     } finally {
       auth.destroy();
@@ -318,7 +328,7 @@ describe("PhoneAuth", () => {
     setSystemTime(startedAt);
     try {
       const phone = "+14155559993";
-      const { expiresAt } = await auth.sendOtp(phone, "login:tenant-a");
+      const { expiresAt } = await auth.sendOtp(phone, "login:tenant-a", "sms");
       setSystemTime(new Date(expiresAt.getTime() - 1));
       provider.verifyHook = async () => {
         setSystemTime(new Date(expiresAt.getTime() + provider.operationLockTtlMs - 3));
@@ -327,12 +337,14 @@ describe("PhoneAuth", () => {
       await expect(auth.verifyOtp(phone, "000000", "login:tenant-a")).resolves.toEqual({
         valid: false,
       });
-      await expect(auth.sendOtp(phone, "mfa:enroll:user-a")).rejects.toThrow("already in progress");
+      await expect(auth.sendOtp(phone, "mfa:enroll:user-a", "sms")).rejects.toThrow(
+        "already in progress",
+      );
       expect(provider.sendAttempts).toEqual([phone]);
 
       provider.verifyHook = undefined;
       setSystemTime(new Date(expiresAt.getTime() + provider.operationLockTtlMs + 1));
-      await auth.sendOtp(phone, "mfa:enroll:user-a");
+      await auth.sendOtp(phone, "mfa:enroll:user-a", "sms");
       expect(provider.sendAttempts).toEqual([phone, phone]);
     } finally {
       auth.destroy();
@@ -346,9 +358,13 @@ describe("PhoneAuth", () => {
       const phone = "+14155559998";
       provider.rejectNextSend = true;
 
-      await expect(auth.sendOtp(phone, "login:tenant-a")).rejects.toThrow("SMS delivery failed");
-      await expect(auth.sendOtp(phone, "mfa:enroll:user-a")).rejects.toThrow("already in progress");
-      await auth.sendOtp(phone, "login:tenant-a");
+      await expect(auth.sendOtp(phone, "login:tenant-a", "sms")).rejects.toThrow(
+        "SMS delivery failed",
+      );
+      await expect(auth.sendOtp(phone, "mfa:enroll:user-a", "sms")).rejects.toThrow(
+        "already in progress",
+      );
+      await auth.sendOtp(phone, "login:tenant-a", "sms");
 
       expect(provider.sendAttempts).toEqual([phone, phone]);
       expect(await auth.verifyOtp(phone, "123456", "login:tenant-a")).toEqual({
@@ -377,10 +393,12 @@ describe("PhoneAuth", () => {
     const auth = new PhoneAuth({ managedProvider: provider });
     try {
       const phone = "+14155559997";
-      const loginSend = auth.sendOtp(phone, "login:tenant-a");
+      const loginSend = auth.sendOtp(phone, "login:tenant-a", "sms");
       await sendStarted;
 
-      await expect(auth.sendOtp(phone, "mfa:enroll:user-a")).rejects.toThrow("already in progress");
+      await expect(auth.sendOtp(phone, "mfa:enroll:user-a", "sms")).rejects.toThrow(
+        "already in progress",
+      );
       expect(provider.sendAttempts).toEqual([phone]);
 
       releaseSend();
@@ -403,7 +421,7 @@ describe("PhoneAuth", () => {
       tokenStore: new TokenStore({ backend }),
     });
     try {
-      await expect(auth.sendOtp("+14155559991", "login:tenant-a")).rejects.toThrow(
+      await expect(auth.sendOtp("+14155559991", "login:tenant-a", "sms")).rejects.toThrow(
         "SMS delivery failed",
       );
       expect(provider.sendAttempts).toEqual([]);
@@ -421,10 +439,12 @@ describe("PhoneAuth", () => {
     });
     try {
       const phone = "+14155559996";
-      await auth.sendOtp(phone, "login:tenant-a");
+      await auth.sendOtp(phone, "login:tenant-a", "sms");
       backend.failTransitions = true;
 
-      await expect(auth.sendOtp(phone, "login:tenant-a")).rejects.toThrow("SMS delivery failed");
+      await expect(auth.sendOtp(phone, "login:tenant-a", "sms")).rejects.toThrow(
+        "SMS delivery failed",
+      );
       expect(provider.sendAttempts).toEqual([phone]);
     } finally {
       auth.destroy();
@@ -441,13 +461,17 @@ describe("PhoneAuth", () => {
     try {
       const phone = "+14155559992";
       backend.failActivePublication = true;
-      await expect(auth.sendOtp(phone, "login:tenant-a")).rejects.toThrow("SMS delivery failed");
+      await expect(auth.sendOtp(phone, "login:tenant-a", "sms")).rejects.toThrow(
+        "SMS delivery failed",
+      );
 
-      await expect(auth.sendOtp(phone, "mfa:enroll:user-a")).rejects.toThrow("already in progress");
+      await expect(auth.sendOtp(phone, "mfa:enroll:user-a", "sms")).rejects.toThrow(
+        "already in progress",
+      );
       expect(provider.sendAttempts).toEqual([phone]);
 
       backend.failActivePublication = false;
-      const resent = await auth.sendOtp(phone, "login:tenant-a");
+      const resent = await auth.sendOtp(phone, "login:tenant-a", "sms");
       expect(resent.expiresAt.getTime()).toBe(provider.challengeExpiresAt);
       expect(provider.sendAttempts).toEqual([phone, phone]);
       expect(await auth.verifyOtp(phone, "123456", "login:tenant-a")).toEqual({
@@ -476,11 +500,13 @@ describe("PhoneAuth", () => {
     const auth = new PhoneAuth({ managedProvider: provider });
     try {
       const phone = "+14155559995";
-      await auth.sendOtp(phone, "login:tenant-a");
+      await auth.sendOtp(phone, "login:tenant-a", "sms");
       const firstCheck = auth.verifyOtp(phone, "123456", "login:tenant-a");
       await checkStarted;
 
-      await expect(auth.sendOtp(phone, "login:tenant-a")).rejects.toThrow("already in progress");
+      await expect(auth.sendOtp(phone, "login:tenant-a", "sms")).rejects.toThrow(
+        "already in progress",
+      );
       await expect(auth.verifyOtp(phone, "123456", "login:tenant-a")).rejects.toThrow(
         "already in progress",
       );
@@ -502,7 +528,7 @@ describe("PhoneAuth", () => {
     setSystemTime(startedAt);
     try {
       const phone = "+14155559990";
-      await auth.sendOtp(phone, "login:tenant-a");
+      await auth.sendOtp(phone, "login:tenant-a", "sms");
       provider.verifyHook = async () => {
         setSystemTime(new Date(Date.now() + provider.operationLockTtlMs + 1));
       };

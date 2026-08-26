@@ -2901,29 +2901,22 @@ export function getPhoneAuth(): PhoneAuth {
   let managedProvider: ManagedSmsOtpProvider | undefined;
   if (process.env.SMS_PROVIDER === "mock" && process.env.NODE_ENV !== "production") {
     provider = new MockSmsProvider();
-  } else if (
-    process.env.TWILIO_ACCOUNT_SID &&
-    process.env.TWILIO_AUTH_TOKEN &&
-    process.env.TWILIO_VERIFY_SERVICE_SID
-  ) {
-    managedProvider = new TwilioVerifyProvider({
-      accountSid: process.env.TWILIO_ACCOUNT_SID,
-      authToken: process.env.TWILIO_AUTH_TOKEN,
-      serviceSid: process.env.TWILIO_VERIFY_SERVICE_SID,
-      tokenTtlSeconds: Number(process.env.TWILIO_VERIFY_TOKEN_TTL_SECONDS),
-    });
-  } else if (
-    process.env.TWILIO_ACCOUNT_SID &&
-    process.env.TWILIO_AUTH_TOKEN &&
-    process.env.TWILIO_FROM
-  ) {
-    provider = new TwilioSmsProvider({
-      accountSid: process.env.TWILIO_ACCOUNT_SID,
-      authToken: process.env.TWILIO_AUTH_TOKEN,
-      from: process.env.TWILIO_FROM,
-    });
-  } else if (process.env.NODE_ENV === "production") {
-    throw new Error("SMS provider not configured");
+  } else {
+    managedProvider = buildTwilioVerifyProviderFromEnvironment();
+    if (
+      !managedProvider &&
+      process.env.TWILIO_ACCOUNT_SID &&
+      process.env.TWILIO_AUTH_TOKEN &&
+      process.env.TWILIO_FROM
+    ) {
+      provider = new TwilioSmsProvider({
+        accountSid: process.env.TWILIO_ACCOUNT_SID,
+        authToken: process.env.TWILIO_AUTH_TOKEN,
+        from: process.env.TWILIO_FROM,
+      });
+    } else if (!managedProvider && process.env.NODE_ENV === "production") {
+      throw new Error("SMS provider not configured");
+    }
   }
 
   _phoneAuth = new PhoneAuth({
@@ -2932,6 +2925,27 @@ export function getPhoneAuth(): PhoneAuth {
     tokenStore: new TokenStore({ backend: getMfaBackend() }),
   });
   return _phoneAuth;
+}
+
+function buildTwilioVerifyProviderFromEnvironment(
+  env: NodeJS.ProcessEnv = process.env,
+): TwilioVerifyProvider | undefined {
+  const verifyConfigured =
+    env.TWILIO_VERIFY_SERVICE_SID !== undefined ||
+    env.TWILIO_VERIFY_TOKEN_TTL_SECONDS !== undefined;
+  if (!verifyConfigured) return undefined;
+  return new TwilioVerifyProvider({
+    accountSid: env.TWILIO_ACCOUNT_SID ?? "",
+    authToken: env.TWILIO_AUTH_TOKEN ?? "",
+    serviceSid: env.TWILIO_VERIFY_SERVICE_SID ?? "",
+    tokenTtlSeconds: Number(env.TWILIO_VERIFY_TOKEN_TTL_SECONDS),
+  });
+}
+
+/** Fail app construction before health/readiness can accept malformed Verify config. */
+export function validatePhoneAuthProviderEnvironment(env: NodeJS.ProcessEnv = process.env): void {
+  if (env.SMS_PROVIDER === "mock" && env.NODE_ENV !== "production") return;
+  buildTwilioVerifyProviderFromEnvironment(env);
 }
 
 function isWhatsAppOtpEnabled(): boolean {
@@ -3329,6 +3343,7 @@ async function buildAuthOrMfaResponse(
     const { expiresAt } = await getPhoneAuth().sendOtp(
       smsMfa.phone,
       smsMfaChallengePurpose(challenge.challengeId),
+      "sms",
     );
     return {
       ok: true,
@@ -5844,7 +5859,11 @@ auth.post("/sms/send", async (c) => {
 
   let expiresAt: Date;
   try {
-    ({ expiresAt } = await getPhoneAuth().sendOtp(body.phone, smsLoginPurpose(resolvedTenantId)));
+    ({ expiresAt } = await getPhoneAuth().sendOtp(
+      body.phone,
+      smsLoginPurpose(resolvedTenantId),
+      "sms",
+    ));
   } catch (err) {
     if (err instanceof Error && err.message === "SMS provider not configured") {
       return c.json<ApiResponse>({ ok: false, error: "SMS provider not configured" }, 503);
@@ -6018,6 +6037,7 @@ auth.post("/whatsapp/send", async (c) => {
     ({ expiresAt } = await getPhoneAuth().sendOtp(
       body.phone,
       whatsappLoginPurpose(resolvedTenantId),
+      "whatsapp",
     ));
   } catch (err) {
     if (err instanceof Error && err.message === "SMS provider not configured") {
@@ -7432,6 +7452,7 @@ auth.post("/mfa/sms/enroll", async (c) => {
     ({ expiresAt } = await getPhoneAuth().sendOtp(
       body.phone,
       smsMfaEnrollPurpose(session.payload.userId),
+      "sms",
     ));
   } catch (err) {
     if (err instanceof Error && err.message === "SMS provider not configured") {
@@ -7573,6 +7594,7 @@ auth.post("/mfa/sms/send", async (c) => {
     ({ expiresAt } = await getPhoneAuth().sendOtp(
       smsMfa.phone,
       smsMfaManagePurpose(session.payload.userId),
+      "sms",
     ));
   } catch (err) {
     if (err instanceof Error && err.message === "SMS provider not configured") {

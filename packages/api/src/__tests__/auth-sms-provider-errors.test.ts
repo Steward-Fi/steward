@@ -1,13 +1,16 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import {
   SmsChallengeInProgressError,
   SmsDeliveryError,
   SmsVerificationError,
   SmsVerificationNotAttemptedError,
 } from "@stwd/auth";
+import { closeDb } from "@stwd/db";
+import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 
 process.env.NODE_ENV = "test";
 process.env.STEWARD_PGLITE_MEMORY = "true";
+process.env.DATABASE_URL = process.env.DATABASE_URL || "postgres://test:test@localhost:5432/test";
 process.env.STEWARD_MASTER_PASSWORD = "sms-provider-errors-master-password";
 process.env.STEWARD_JWT_SECRET = "sms-provider-errors-jwt-secret-with-enough-entropy";
 process.env.STEWARD_AUDIT_HMAC_KEY = "sms-provider-errors-audit-key-with-enough-entropy";
@@ -17,6 +20,7 @@ process.env.TWILIO_AUTH_TOKEN = "twilio-test-auth-token";
 process.env.TWILIO_VERIFY_SERVICE_SID = `VA${"b".repeat(32)}`;
 process.env.TWILIO_VERIFY_TOKEN_TTL_SECONDS = "600";
 process.env.TWILIO_FROM = "+14155550000";
+process.env.WHATSAPP_OTP_ENABLED = "true";
 process.env.STEWARD_ALLOW_AUTH_RATE_LIMIT_SOFT_FAIL = "true";
 
 const { app, createApp } = await import("../app");
@@ -33,8 +37,25 @@ const {
 const ORIGINAL_CONSOLE_ERROR = console.error;
 const ORIGINAL_FETCH = globalThis.fetch;
 
+beforeAll(async () => {
+  const { db, client } = await createPGLiteDb("memory://");
+  setPGLiteOverride(db, async () => {
+    await client.close();
+  });
+});
+
+afterAll(async () => {
+  await closeDb();
+});
+
 beforeEach(async () => {
+  delete process.env.SMS_PROVIDER;
+  process.env.TWILIO_ACCOUNT_SID = `AC${"a".repeat(32)}`;
+  process.env.TWILIO_AUTH_TOKEN = "twilio-test-auth-token";
+  process.env.TWILIO_VERIFY_SERVICE_SID = `VA${"b".repeat(32)}`;
   process.env.TWILIO_VERIFY_TOKEN_TTL_SECONDS = "600";
+  process.env.TWILIO_FROM = "+14155550000";
+  process.env.WHATSAPP_OTP_ENABLED = "true";
   await initAuthStores(false);
 });
 
@@ -55,7 +76,7 @@ describe("SMS provider HTTP errors", () => {
       );
     }) as typeof fetch;
     const phoneAuth = getPhoneAuth();
-    const { expiresAt } = await phoneAuth.sendOtp("+14155550123", "login:tenant-a");
+    const { expiresAt } = await phoneAuth.sendOtp("+14155550123", "login:tenant-a", "sms");
 
     expect(requestUrl).toBe(
       `https://verify.twilio.com/v2/Services/${process.env.TWILIO_VERIFY_SERVICE_SID}/Verifications`,
@@ -63,9 +84,84 @@ describe("SMS provider HTTP errors", () => {
     expect(expiresAt.getTime()).toBe(createdAt.getTime() + 10 * 60 * 1000);
   });
 
-  it("fails closed when the Verify service TTL is not explicitly configured", () => {
+  it.each([
+    undefined,
+    "",
+    "not-a-number",
+    "600.5",
+    "119",
+    "86401",
+  ])("fails app startup when the Verify service TTL is invalid (%s)", (ttl) => {
+    if (ttl === undefined) delete process.env.TWILIO_VERIFY_TOKEN_TTL_SECONDS;
+    else process.env.TWILIO_VERIFY_TOKEN_TTL_SECONDS = ttl;
+    expect(() => createApp()).toThrow("tokenTtlSeconds must be between 120 and 86400");
+  });
+
+  it.each([
+    { path: "/auth/sms/send", phone: "+14155550130", channel: "sms" },
+    { path: "/auth/whatsapp/send", phone: "+14155550131", channel: "whatsapp" },
+  ])("sends $path through Twilio Verify Channel=$channel", async ({ path, phone, channel }) => {
+    const requests: Array<{ url: string; body: URLSearchParams }> = [];
+    const createdAt = new Date(Date.now() - 1000);
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      requests.push({
+        url: String(input),
+        body: new URLSearchParams(String(init?.body)),
+      });
+      return new Response(
+        JSON.stringify({ status: "pending", date_created: createdAt.toISOString() }),
+        { status: 201 },
+      );
+    }) as typeof fetch;
+
+    const response = await app.request(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ phone }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url).toBe(
+      `https://verify.twilio.com/v2/Services/${process.env.TWILIO_VERIFY_SERVICE_SID}/Verifications`,
+    );
+    expect(requests[0]?.body.get("To")).toBe(phone);
+    expect(requests[0]?.body.get("Channel")).toBe(channel);
+  });
+
+  it("fails WhatsApp closed instead of sending through the legacy SMS transport", async () => {
+    delete process.env.TWILIO_VERIFY_SERVICE_SID;
     delete process.env.TWILIO_VERIFY_TOKEN_TTL_SECONDS;
-    expect(() => getPhoneAuth()).toThrow("tokenTtlSeconds must be between 120 and 86400");
+    await initAuthStores(false);
+    const requests: string[] = [];
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      requests.push(String(input));
+      return new Response(null, { status: 201 });
+    }) as typeof fetch;
+
+    const response = await app.request("/auth/whatsapp/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ phone: "+14155550132" }),
+    });
+
+    expect(response.status).toBe(503);
+    expect(requests).toEqual([]);
+  });
+
+  it("preserves explicit non-production mock precedence during startup validation", () => {
+    process.env.SMS_PROVIDER = "mock";
+    delete process.env.TWILIO_VERIFY_TOKEN_TTL_SECONDS;
+    expect(() => createApp()).not.toThrow();
+  });
+
+  it.each([
+    "TWILIO_ACCOUNT_SID",
+    "TWILIO_AUTH_TOKEN",
+    "TWILIO_VERIFY_SERVICE_SID",
+  ] as const)("rejects partial Verify config instead of falling back to TWILIO_FROM (%s missing)", (key) => {
+    delete process.env[key];
+    expect(() => createApp()).toThrow();
   });
 
   it.each([
@@ -156,7 +252,7 @@ describe("SMS provider HTTP errors", () => {
         { status: 201 },
       );
     }) as typeof fetch;
-    await getPhoneAuth().sendOtp(phone, purpose);
+    await getPhoneAuth().sendOtp(phone, purpose, "sms");
 
     const response = await app.request("/auth/sms/verify", {
       method: "POST",
@@ -196,7 +292,7 @@ describe("SMS provider HTTP errors", () => {
       );
     }) as typeof fetch;
     const phoneAuth = getPhoneAuth();
-    await phoneAuth.sendOtp(phone, purpose);
+    await phoneAuth.sendOtp(phone, purpose, "sms");
     const activeCheck = phoneAuth.verifyOtp(phone, "000000", purpose);
     await checkStarted;
 

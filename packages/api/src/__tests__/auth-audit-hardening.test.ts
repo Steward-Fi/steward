@@ -146,13 +146,21 @@ describe("auth and audit hardening", () => {
     expect(auditServiceSource).not.toContain("const fromSeq = 1");
   });
 
-  it("binds phone login OTPs to tenant-specific purposes", () => {
+  it("binds phone login OTPs to tenant-specific purposes and delivery channels", () => {
     expect(authSource).toContain("function smsLoginPurpose");
     expect(authSource).toContain("function whatsappLoginPurpose");
-    expect(authSource).toContain("sendOtp(body.phone, smsLoginPurpose(resolvedTenantId))");
+    expect(authSource).toContain(`getPhoneAuth().sendOtp(
+      body.phone,
+      smsLoginPurpose(resolvedTenantId),
+      "sms",
+    )`);
     expect(authSource).toContain("const otpPurpose = smsLoginPurpose(otpTenantId)");
     expect(authSource).toContain("verifyOtp(body.phone, body.code, otpPurpose)");
-    expect(authSource).toContain("whatsappLoginPurpose(resolvedTenantId)");
+    expect(authSource).toContain(`getPhoneAuth().sendOtp(
+      body.phone,
+      whatsappLoginPurpose(resolvedTenantId),
+      "whatsapp",
+    )`);
     expect(authSource).toContain("whatsappLoginPurpose(otpTenantId)");
   });
 

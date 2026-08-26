@@ -3124,7 +3124,11 @@ for (const channel of ["sms", "whatsapp"] as const) {
     const userId = c.get("userId");
     let expiresAt: Date;
     try {
-      ({ expiresAt } = await getPhoneAuth().sendOtp(body.phone, phoneLinkPurpose(channel, userId)));
+      ({ expiresAt } = await getPhoneAuth().sendOtp(
+        body.phone,
+        phoneLinkPurpose(channel, userId),
+        channel,
+      ));
     } catch (err) {
       if (err instanceof Error && err.message === "SMS provider not configured") {
         return c.json<ApiResponse>(

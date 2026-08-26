@@ -59,7 +59,7 @@ import { agentEnrollRoutes } from "./routes/agent-enroll";
 import { agentRoutes, createAgentBatch } from "./routes/agents";
 import { approvalRoutes } from "./routes/approvals";
 import { auditRoutes } from "./routes/audit";
-import { authRoutes } from "./routes/auth";
+import { authRoutes, validatePhoneAuthProviderEnvironment } from "./routes/auth";
 import { conditionSetRoutes } from "./routes/condition-sets";
 import { dashboardRoutes } from "./routes/dashboard";
 import { identityDiscoveryRoutes } from "./routes/discovery";
@@ -103,6 +103,7 @@ const startTime = Date.now();
  * composition root (see compose.ts).
  */
 export function createApp(): Hono<{ Variables: AppVariables }> {
+  validatePhoneAuthProviderEnvironment();
   const app = new Hono<{ Variables: AppVariables }>();
 
   // ─── Global error handler ───────────────────────────────────────────────────

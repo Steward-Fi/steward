@@ -15,6 +15,7 @@ import { randomBytes, randomInt } from "node:crypto";
 import { hashSha256Hex } from "./crypto";
 import {
   ConsoleSmsProvider,
+  type ManagedOtpDeliveryChannel,
   type ManagedSmsOtpProvider,
   SmsDeliveryError,
   type SmsProvider,
@@ -300,7 +301,11 @@ export class PhoneAuth {
     }
   }
 
-  async sendOtp(phone: string, purpose = "login"): Promise<{ expiresAt: Date }> {
+  async sendOtp(
+    phone: string,
+    purpose: string,
+    deliveryChannel: ManagedOtpDeliveryChannel,
+  ): Promise<{ expiresAt: Date }> {
     if (!isValidE164(phone)) {
       throw new Error("phone must be E.164 (e.g. +14155551234)");
     }
@@ -315,11 +320,14 @@ export class PhoneAuth {
         // request; a lost lease fails before any remote side effect.
         await this.renewManagedOperation(lock, "send");
         markProviderAttempted();
-        const delivery = await this.managedProvider!.send(phone);
+        const delivery = await this.managedProvider!.send(phone, deliveryChannel);
         await this.finalizeManagedChallenge(phone, purpose, reserved, delivery.expiresAt);
         return delivery;
       });
     }
+
+    const supportedChannels = this.provider?.otpDeliveryChannels ?? (["sms"] as const);
+    if (!supportedChannels.includes(deliveryChannel)) throw new SmsDeliveryError();
 
     const expiresAt = new Date(Date.now() + this.tokenTtlMs);
     const code = generateCode();
