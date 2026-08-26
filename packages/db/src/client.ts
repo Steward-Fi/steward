@@ -541,6 +541,11 @@ export function hasTenantTransactionDatabase(expected?: {
 }): boolean {
   const context = tenantTransactionDatabaseStorage.getStore();
   if (!context?.active || !context.db) return false;
+  // An explicitly supplied, distinct executor is an independent authority
+  // connection. Classify it before comparing tenant identity so callers can
+  // probe whether a separate transaction is active without turning that
+  // probe into a tenant-enumerating mismatch error.
+  if (expected?.db !== undefined && expected.db !== context.db) return false;
   if (
     expected &&
     (context.tenantId !== expected.tenantId ||
@@ -556,7 +561,6 @@ export function hasTenantTransactionDatabase(expected?: {
   ) {
     throw new Error("RLS_TENANT_DATABASE_CHARACTERISTICS_MISMATCH");
   }
-  if (expected?.db !== undefined && expected.db !== context.db) return false;
   return true;
 }
 
