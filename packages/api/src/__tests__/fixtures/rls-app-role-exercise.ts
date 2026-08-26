@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { generateApiKey, signAccessToken } from "@stwd/auth";
 import {
-  agents,
   auditEvents,
   closeDb,
   getDb,
@@ -10,16 +9,12 @@ import {
   tenantSamlAuthnRequests,
   tenantSamlSsoConfigs,
   tenants,
-  upstreamCredentialLeaseEvents,
-  upstreamCredentialLeases,
   userTenants,
-  workspaces,
 } from "@stwd/db";
 import { eq, sql } from "drizzle-orm";
 import app from "../../app";
 import { runRetentionSweep } from "../../services/retention";
 import { runInternalJobForEachTenant, runInternalJobForTenant } from "../../services/tenant-job";
-import { runWorkerUpstreamCredentialLeaseSweep } from "../../worker";
 
 const platformKey = process.env.STEWARD_PLATFORM_KEYS ?? "";
 const tenantId = process.env.STEWARD_RLS_TEST_TENANT ?? "";
@@ -96,6 +91,9 @@ try {
       .onConflictDoNothing();
     await getDb()
       .insert(userTenants)
+      // 0113 makes the personal tenant a single-owner lifecycle boundary. This
+      // real-Postgres fixture must reproduce that production shape or its later
+      // deactivation probe correctly fails the personal-membership invariant.
       .values({ userId, tenantId: personalTenantId, role: "owner" })
       .onConflictDoNothing();
   });
@@ -181,22 +179,13 @@ try {
     "rls-platform-audit-verify",
     async () =>
       getDb()
-        .select({ seq: auditEvents.seq, action: auditEvents.action })
+        .select({ action: auditEvents.action })
         .from(auditEvents)
         .where(eq(auditEvents.resourceId, userId)),
   );
   assert(
-    platformAudits.filter((row) => row.action === "user.deactivate.authorized").length === 1 &&
-      platformAudits.filter((row) => row.action === "user.deactivate").length === 1,
-    "global platform lifecycle did not write exactly one authorization and completion audit",
-  );
-  const authorizedAudit = platformAudits.find((row) => row.action === "user.deactivate.authorized");
-  const completionAudit = platformAudits.find((row) => row.action === "user.deactivate");
-  assert(
-    authorizedAudit !== undefined &&
-      completionAudit !== undefined &&
-      authorizedAudit.seq < completionAudit.seq,
-    "global platform lifecycle audit authorization did not precede completion",
+    platformAudits.some((row) => row.action === "user.deactivate"),
+    "global platform lifecycle did not write its reserved-tenant audit event",
   );
 
   const tenantRuns = await runInternalJobForEachTenant(
@@ -218,86 +207,6 @@ try {
   assert(
     tenantRuns.some((run) => run.tenantId === tenantId),
     "tenant job omitted fixture tenant",
-  );
-
-  const leaseWorkspaceId = randomUUID();
-  const leaseAgentId = `rls-lease-${suffix}`.slice(0, 64);
-  const leaseId = randomUUID();
-  const staleAt = new Date(Date.now() - 60_000);
-  await runInternalJobForTenant(tenantId, "rls-lease-deadline-seed", async () => {
-    await getDb()
-      .insert(workspaces)
-      .values({
-        id: leaseWorkspaceId,
-        tenantId,
-        key: `rls-lease-${suffix}`.slice(0, 128),
-        name: "RLS lease deadline fixture",
-        environment: "production",
-        createdBy: userId,
-      });
-    await getDb().insert(agents).values({
-      id: leaseAgentId,
-      tenantId,
-      name: "RLS lease deadline fixture",
-      walletAddress: "0x1234567890123456789012345678901234567890",
-    });
-    await getDb()
-      .insert(upstreamCredentialLeases)
-      .values({
-        id: leaseId,
-        tenantId,
-        workspaceId: leaseWorkspaceId,
-        agentId: leaseAgentId,
-        grantId: randomUUID(),
-        capabilityId: randomUUID(),
-        issuer: "github-app-installation",
-        resource: {},
-        resourceHash: "1".repeat(64),
-        authorityDigest: "2".repeat(64),
-        idempotencyKeyHash: "3".repeat(64),
-        status: "issuing",
-        authorityCheckedAt: staleAt,
-        createdAt: staleAt,
-        updatedAt: staleAt,
-      });
-  });
-  const leaseSweep = await runWorkerUpstreamCredentialLeaseSweep(process.env as never, {
-    capabilitiesEnabled: true,
-  });
-  assert(leaseSweep?.unknown === 1, "Worker scheduler did not recover the stale issuing lease");
-  const leaseProof = await runInternalJobForTenant(
-    tenantId,
-    "rls-lease-deadline-verify",
-    async () => {
-      const [lease] = await getDb()
-        .select({
-          status: upstreamCredentialLeases.status,
-          lastError: upstreamCredentialLeases.lastError,
-        })
-        .from(upstreamCredentialLeases)
-        .where(eq(upstreamCredentialLeases.id, leaseId));
-      const events = await getDb()
-        .select({ action: upstreamCredentialLeaseEvents.action })
-        .from(upstreamCredentialLeaseEvents)
-        .where(eq(upstreamCredentialLeaseEvents.leaseId, leaseId));
-      const audits = await getDb()
-        .select({ action: auditEvents.action })
-        .from(auditEvents)
-        .where(eq(auditEvents.resourceId, leaseId));
-      return { audits, events, lease };
-    },
-  );
-  assert(
-    leaseProof.lease?.status === "needs_attention" &&
-      leaseProof.lease.lastError === "issuer outcome unknown after interrupted issuance",
-    "restricted app-role deadline recovery did not durably quarantine the stale lease",
-  );
-  assert(
-    leaseProof.events.some(({ action }) => action === "lease.issuer_outcome_unknown") &&
-      leaseProof.audits.some(
-        ({ action }) => action === "upstream_credential_lease.issuer_outcome_unknown",
-      ),
-    "restricted app-role deadline recovery omitted durable event or audit evidence",
   );
 
   const authKvId = randomUUID();

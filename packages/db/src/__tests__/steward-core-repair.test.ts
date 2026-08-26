@@ -1,0 +1,1560 @@
+import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { randomUUID } from "node:crypto";
+import { readdirSync, readFileSync } from "node:fs";
+import postgres from "postgres";
+
+import {
+  STEWARD_CORE_REPAIR_CATALOG_SHA256,
+  STEWARD_PRODUCTION_ROLLBACK_IMAGE,
+  STEWARD_PRODUCTION_ROLLBACK_SOURCE,
+  validateStewardCoreRepairOldImageReceipt,
+} from "../../scripts/check-steward-core-repair-old-image";
+import {
+  inspectStewardCoreRepair,
+  runStewardCoreRepair,
+  type StewardCoreRepairClient,
+} from "../steward-core-repair";
+import catalogManifest from "../steward-core-repair-catalog.json";
+import {
+  loadStewardCoreRepairSources,
+  quoteStewardCoreRepairIdentifier,
+  renderStewardCoreRepairMigration,
+  STEWARD_CORE_REPAIR_LEDGER,
+  STEWARD_CORE_REPAIR_SOURCES,
+  type StewardCoreRepairExecutor,
+  type StewardCoreRepairSchema,
+  sha256,
+  splitStewardMigrationStatements,
+} from "../steward-core-repair-sources";
+import {
+  inspectStewardReleaseReadiness,
+  type StewardReleaseReadinessClient,
+} from "../steward-release-readiness";
+import {
+  getStewardSchemaMigrationExpectations,
+  runStewardSchemaMigrations,
+  type StewardSchemaMigrationClient,
+} from "../steward-schema-migrations";
+
+setDefaultTimeout(300_000);
+
+const migrationsFolder = new URL("../../drizzle", import.meta.url).pathname;
+const expectedCandidate = {
+  image: `ghcr.io/steward-fi/steward@sha256:${"c".repeat(64)}`,
+  sourceCommit: "d".repeat(40),
+  evidenceArtifactSha256: `sha256:${"a".repeat(64)}`,
+};
+
+function renderHistoricalFixture(source: string, schema: StewardCoreRepairSchema): string {
+  if (schema === "public") return source;
+  const quoted = quoteStewardCoreRepairIdentifier(schema);
+  return source
+    .replaceAll('"public".', `${quoted}.`)
+    .replaceAll("public.", `${quoted}.`)
+    .replaceAll("pg_catalog, public", `pg_catalog, ${quoted}`);
+}
+
+async function applySource(
+  executor: StewardCoreRepairExecutor,
+  source: string,
+  label: string,
+): Promise<void> {
+  const statements = splitStewardMigrationStatements(source);
+  for (let index = 0; index < statements.length; index += 1) {
+    try {
+      await executor.unsafe(statements[index] as string);
+    } catch (error) {
+      throw new Error(`${label} fixture failed at statement ${index + 1}`, { cause: error });
+    }
+  }
+}
+
+async function installHistoricalFloor(
+  client: StewardCoreRepairExecutor,
+  schema: StewardCoreRepairSchema,
+  include0083 = true,
+): Promise<void> {
+  if (schema !== "public") {
+    await client.unsafe(`CREATE SCHEMA ${quoteStewardCoreRepairIdentifier(schema)}`);
+  }
+  const files = readdirSync(migrationsFolder)
+    .filter((file) => /^\d{4}_.+\.sql$/.test(file))
+    .filter((file) => Number(file.slice(0, 4)) <= 81)
+    .sort();
+  for (const file of files) {
+    await applySource(
+      client,
+      renderHistoricalFixture(readFileSync(`${migrationsFolder}/${file}`, "utf8"), schema),
+      file,
+    );
+  }
+  const quotedSchema = quoteStewardCoreRepairIdentifier(schema);
+  await client.unsafe(`
+    ALTER TABLE ${quotedSchema}."evm_wallet_nonces"
+      REPLICA IDENTITY USING INDEX "evm_wallet_nonces_wallet_chain_idx"
+  `);
+  if (include0083) {
+    await applySource(
+      client,
+      readFileSync(`${migrationsFolder}/0083_provider_approval_quorum.sql`, "utf8"),
+      "0083_provider_approval_quorum",
+    );
+  }
+}
+
+describe("Steward production core-repair source envelope", () => {
+  test("pins every source hash and marks only the pre-existing 0083 migration as skipped", () => {
+    expect(STEWARD_CORE_REPAIR_SOURCES).toHaveLength(29);
+    expect(
+      STEWARD_CORE_REPAIR_SOURCES.filter((source) => source.action === "verified_existing").map(
+        (source) => source.tag,
+      ),
+    ).toEqual(["0083_provider_approval_quorum"]);
+    expect(() => loadStewardCoreRepairSources("public")).not.toThrow();
+    expect(() => loadStewardCoreRepairSources("steward")).not.toThrow();
+  });
+
+  test("renders only the reviewed 0091, 0108, and 0110 repair bindings", () => {
+    const source0091 = readFileSync(
+      `${migrationsFolder}/0091_external_custody_outcome_reconciliation.sql`,
+      "utf8",
+    );
+    const source0110 = readFileSync(
+      `${migrationsFolder}/0110_agent_delete_lease_lifecycle.sql`,
+      "utf8",
+    );
+    const source0108 = readFileSync(
+      `${migrationsFolder}/0108_evm_nonce_tenant_ownership.sql`,
+      "utf8",
+    );
+    const rendered0091 = renderStewardCoreRepairMigration(
+      "0091_external_custody_outcome_reconciliation",
+      source0091,
+      "steward",
+    );
+    const rendered0110 = renderStewardCoreRepairMigration(
+      "0110_agent_delete_lease_lifecycle",
+      source0110,
+      "steward",
+    );
+    const rendered0108 = renderStewardCoreRepairMigration(
+      "0108_evm_nonce_tenant_ownership",
+      source0108,
+      "steward",
+    );
+
+    expect(rendered0091).toContain('ALTER TYPE "steward"."transaction_status"');
+    expect(rendered0091).not.toContain('"public"."transaction_status"');
+    expect(rendered0110).toContain('FROM "steward".agents');
+    expect(rendered0110).toContain('SET search_path = pg_catalog, "steward"');
+    expect(rendered0110).not.toContain("public.");
+    expect(rendered0110).not.toContain("pg_catalog, public");
+    expect(source0108).not.toContain("REPLICA IDENTITY");
+    expect(splitStewardMigrationStatements(source0108)).toHaveLength(22);
+    expect(splitStewardMigrationStatements(rendered0108)).toHaveLength(26);
+    expect(rendered0108.match(/REPLICA IDENTITY FULL/g)).toHaveLength(2);
+    expect(rendered0108.match(/REPLICA IDENTITY USING INDEX/g)).toHaveLength(2);
+    expect(rendered0108).not.toContain("REPLICA IDENTITY DEFAULT");
+  });
+
+  test("retains the independently audited 0084-0110 catalog envelope", () => {
+    for (const schema of ["public", "steward"] as const) {
+      // PostgreSQL 18 additionally exposes NOT NULL constraints as contype=n.
+      // Excluding those representation-only records reproduces the independent
+      // production preflight's semantic catalog counts exactly.
+      expect(catalogManifest.schemas[schema].changes0084To0110.semanticFinalCounts).toEqual({
+        column: 152,
+        constraint: 70,
+        enum: 1,
+        function: 14,
+        index: 39,
+        relation: 12,
+        trigger: 14,
+      });
+      const triggers = catalogManifest.schemas[schema].nonInternalTriggers;
+      expect(triggers.before.recordCount).toBe(7);
+      expect(triggers.after.recordCount).toBe(21);
+      for (const envelope of [triggers.before, triggers.after]) {
+        expect(envelope.records).toHaveLength(envelope.recordCount);
+        expect(envelope.records.every((record) => record.kind === "trigger")).toBe(true);
+        expect(sha256(JSON.stringify(envelope.records))).toBe(envelope.hash);
+      }
+      const triggerFunctions = catalogManifest.schemas[schema].nonInternalTriggerFunctions;
+      expect(triggerFunctions.before.recordCount).toBe(3);
+      expect(triggerFunctions.after.recordCount).toBe(14);
+      expect(triggerFunctions.before.hash).not.toBe(triggerFunctions.after.hash);
+      for (const envelope of [triggerFunctions.before, triggerFunctions.after]) {
+        expect(envelope.records).toHaveLength(envelope.recordCount);
+        expect(envelope.records.every((record) => record.kind === "function")).toBe(true);
+        expect(sha256(JSON.stringify(envelope.records))).toBe(envelope.hash);
+      }
+    }
+  });
+});
+
+function validOldImageCompatibilityReceipt() {
+  const probes = {
+    health: "pass",
+    ready: "pass",
+    providerDiscovery: "pass",
+    emailSession: "pass",
+    passkeySession: "pass",
+    sessionRefresh: "pass",
+    chatWrite: "pass",
+  };
+  return {
+    proofVersion: 3,
+    databaseClass: "isolated-production-restore",
+    productionDatabaseTouched: false,
+    targetSchema: "steward",
+    repairVersion: "prod-core-0082-0110-v1",
+    catalogManifestSha256: STEWARD_CORE_REPAIR_CATALOG_SHA256,
+    oldImage: {
+      image: STEWARD_PRODUCTION_ROLLBACK_IMAGE,
+      sourceCommit: STEWARD_PRODUCTION_ROLLBACK_SOURCE,
+      automaticMigrationsDisabled: true,
+    },
+    candidateImage: {
+      image: expectedCandidate.image,
+      sourceCommit: expectedCandidate.sourceCommit,
+      automaticMigrationsDisabled: true,
+    },
+    preRepair: { ...probes },
+    postRepair: { ...probes },
+    candidatePostRepair: { ...probes },
+    rollbackPostCandidate: { ...probes },
+    providerExecution: {
+      drainedBeforeRepair: true,
+      drainMaintainedThroughFinalRollback: true,
+      legacyResume: "blocked_by_0084_authority_fence",
+      candidateEvidenceResumeAndExecution: "pass",
+      rollbackMode: "forward_only_old_image_requires_provider_execution_drain",
+    },
+    independentReview: {
+      reviewedBy: "lalalune",
+      disposition: "approved",
+      candidateSourceCommit: expectedCandidate.sourceCommit,
+      evidenceArtifactSha256: expectedCandidate.evidenceArtifactSha256,
+    },
+    evidenceArtifactSha256: expectedCandidate.evidenceArtifactSha256,
+  };
+}
+
+describe("Steward production core-repair old-image gate", () => {
+  test("accepts only a reviewed forward-only receipt for the exact rollback image", () => {
+    expect(
+      sha256(readFileSync(new URL("../steward-core-repair-catalog.json", import.meta.url), "utf8")),
+    ).toBe(STEWARD_CORE_REPAIR_CATALOG_SHA256);
+    expect(
+      validateStewardCoreRepairOldImageReceipt(
+        validOldImageCompatibilityReceipt(),
+        expectedCandidate,
+      ),
+    ).toEqual(validOldImageCompatibilityReceipt());
+  });
+
+  test("fails closed on image drift, missing probes, or a claimed full rollback", () => {
+    const wrongImage = validOldImageCompatibilityReceipt();
+    wrongImage.oldImage.image = `ghcr.io/steward-fi/steward@sha256:${"b".repeat(64)}`;
+    expect(() => validateStewardCoreRepairOldImageReceipt(wrongImage, expectedCandidate)).toThrow(
+      "does not pin the production rollback image",
+    );
+
+    const wrongCandidate = validOldImageCompatibilityReceipt();
+    wrongCandidate.candidateImage.sourceCommit = "e".repeat(40);
+    expect(() =>
+      validateStewardCoreRepairOldImageReceipt(wrongCandidate, expectedCandidate),
+    ).toThrow("does not pin the approved candidate image");
+
+    const missingProbe = validOldImageCompatibilityReceipt();
+    missingProbe.candidatePostRepair.passkeySession = "fail";
+    expect(() => validateStewardCoreRepairOldImageReceipt(missingProbe, expectedCandidate)).toThrow(
+      "probe passkeySession is not green",
+    );
+
+    const missingFinalRollbackProbe = validOldImageCompatibilityReceipt();
+    missingFinalRollbackProbe.rollbackPostCandidate.passkeySession = "fail";
+    expect(() =>
+      validateStewardCoreRepairOldImageReceipt(missingFinalRollbackProbe, expectedCandidate),
+    ).toThrow("probe passkeySession is not green");
+
+    const supersededProof = validOldImageCompatibilityReceipt();
+    supersededProof.proofVersion = 2;
+    expect(() =>
+      validateStewardCoreRepairOldImageReceipt(supersededProof, expectedCandidate),
+    ).toThrow("does not match the reviewed repair target");
+
+    const unboundReview = validOldImageCompatibilityReceipt();
+    unboundReview.independentReview.candidateSourceCommit = "f".repeat(40);
+    expect(() =>
+      validateStewardCoreRepairOldImageReceipt(unboundReview, expectedCandidate),
+    ).toThrow("independent approval bound to the candidate and evidence");
+
+    const unsafeRollbackClaim = validOldImageCompatibilityReceipt();
+    unsafeRollbackClaim.providerExecution.rollbackMode = "full_rollback";
+    expect(() =>
+      validateStewardCoreRepairOldImageReceipt(unsafeRollbackClaim, expectedCandidate),
+    ).toThrow("does not prove the governed-action boundary");
+
+    const unmaintainedDrain = validOldImageCompatibilityReceipt();
+    unmaintainedDrain.providerExecution.drainMaintainedThroughFinalRollback = false;
+    expect(() =>
+      validateStewardCoreRepairOldImageReceipt(unmaintainedDrain, expectedCandidate),
+    ).toThrow("does not prove the governed-action boundary");
+
+    const wrongEvidence = validOldImageCompatibilityReceipt();
+    wrongEvidence.evidenceArtifactSha256 = `sha256:${"f".repeat(64)}`;
+    expect(() =>
+      validateStewardCoreRepairOldImageReceipt(wrongEvidence, expectedCandidate),
+    ).toThrow("evidence artifact hash does not match the file");
+  });
+});
+
+function createSchemaMismatchClient(
+  resolvedSchema: StewardCoreRepairSchema,
+  options: {
+    unlockSucceeds?: boolean;
+    acquisitionThrows?: boolean;
+    beginThrows?: boolean;
+    rollbackThrows?: boolean;
+  } = {},
+) {
+  const trace: string[] = [];
+  const transaction = {
+    async unsafe(query: string) {
+      if (query.startsWith("SET TRANSACTION")) trace.push("transaction:isolation");
+      else if (query.startsWith("SET LOCAL lock_timeout")) trace.push("transaction:lock-timeout");
+      else if (query.startsWith("SET LOCAL statement_timeout")) {
+        trace.push("transaction:statement-timeout");
+      } else if (query.startsWith("SET LOCAL idle_in_transaction")) {
+        trace.push("transaction:idle-timeout");
+      } else if (query.startsWith("LOCK TABLE")) trace.push("transaction:baseline-locks");
+      else if (query === "SELECT pg_catalog.to_regclass($1)::text AS relation_name") {
+        trace.push("transaction:optional-table-check");
+        return [{ relation_name: null }];
+      } else if (query === "SELECT pg_catalog.current_schema()::text AS schema_name") {
+        trace.push("transaction:resolve-schema");
+        return [{ schema_name: resolvedSchema }];
+      } else if (query.startsWith("SET LOCAL search_path")) {
+        trace.push("transaction:set-search-path");
+      } else {
+        throw new Error(`unexpected fake transaction query: ${query}`);
+      }
+      return [];
+    },
+  } as unknown as StewardCoreRepairExecutor;
+
+  const reserved = {
+    async unsafe(query: string, parameters?: unknown[]) {
+      if (
+        query ===
+        "SELECT pg_catalog.pg_try_advisory_lock(pg_catalog.hashtextextended($1, 0)) AS acquired"
+      ) {
+        trace.push("reserved:lock");
+        if (options.acquisitionThrows) throw new Error("simulated acquisition response loss");
+        return [{ acquired: true }];
+      }
+      if (
+        query ===
+        "SELECT pg_catalog.pg_advisory_unlock(pg_catalog.hashtextextended($1, 0)) AS released"
+      ) {
+        trace.push("reserved:unlock");
+        return [{ released: options.unlockSucceeds ?? true }];
+      }
+      if (query === "BEGIN") {
+        trace.push("reserved:begin");
+        if (options.beginThrows) throw new Error("simulated BEGIN response loss");
+        return [];
+      }
+      if (query === "COMMIT") {
+        trace.push("reserved:commit");
+        return [];
+      }
+      if (query === "ROLLBACK") {
+        trace.push("reserved:rollback");
+        if (options.rollbackThrows) throw new Error("simulated ROLLBACK failure");
+        return [];
+      }
+      return transaction.unsafe(query, parameters);
+    },
+    release() {
+      trace.push("reserved:release");
+    },
+  };
+
+  const client = {
+    async unsafe(query: string) {
+      throw new Error(`pooled connection must not execute repair query: ${query}`);
+    },
+    async begin<T>(callback: (executor: StewardCoreRepairExecutor) => Promise<T>): Promise<T> {
+      trace.push("pooled:begin");
+      return callback(transaction);
+    },
+    async reserve() {
+      trace.push("pooled:reserve");
+      return reserved;
+    },
+    async end() {
+      trace.push("pooled:end");
+    },
+  } as unknown as StewardCoreRepairClient;
+
+  return { client, trace };
+}
+
+describe("Steward production core-repair connection safeguards", () => {
+  test("uses one reserved session for advisory lock, transaction, and unlock", async () => {
+    const { client, trace } = createSchemaMismatchClient("steward");
+
+    await expect(runStewardCoreRepair({ expectedSchema: "public", client })).rejects.toThrow(
+      "target schema mismatch",
+    );
+
+    expect(trace).toEqual([
+      "pooled:reserve",
+      "reserved:lock",
+      "reserved:begin",
+      "transaction:isolation",
+      "transaction:lock-timeout",
+      "transaction:statement-timeout",
+      "transaction:idle-timeout",
+      "transaction:baseline-locks",
+      "transaction:optional-table-check",
+      "transaction:resolve-schema",
+      "reserved:rollback",
+      "reserved:unlock",
+      "reserved:release",
+    ]);
+  });
+
+  test("checks the connection target before setting the transaction search path", async () => {
+    const { client, trace } = createSchemaMismatchClient("steward");
+
+    await expect(
+      runStewardCoreRepair({
+        expectedSchema: "public",
+        client,
+        useAdvisoryLock: false,
+      }),
+    ).rejects.toThrow("target schema mismatch");
+
+    expect(trace.indexOf("transaction:baseline-locks")).toBeGreaterThanOrEqual(0);
+    expect(trace.indexOf("transaction:resolve-schema")).toBeGreaterThan(
+      trace.indexOf("transaction:baseline-locks"),
+    );
+    expect(trace).not.toContain("transaction:set-search-path");
+  });
+
+  test("quarantines the client instead of pooling a session when advisory unlock fails", async () => {
+    const { client, trace } = createSchemaMismatchClient("steward", {
+      unlockSucceeds: false,
+    });
+
+    await expect(runStewardCoreRepair({ expectedSchema: "public", client })).rejects.toThrow(
+      "reserved advisory lock could not be released",
+    );
+
+    expect(trace).toContain("pooled:end");
+    expect(trace).not.toContain("reserved:release");
+  });
+
+  test("quarantines an uncertain advisory-lock acquisition", async () => {
+    const { client, trace } = createSchemaMismatchClient("steward", {
+      acquisitionThrows: true,
+    });
+
+    await expect(runStewardCoreRepair({ expectedSchema: "public", client })).rejects.toThrow(
+      "simulated acquisition response loss",
+    );
+
+    expect(trace).toContain("pooled:end");
+    expect(trace).not.toContain("reserved:unlock");
+    expect(trace).not.toContain("reserved:release");
+  });
+
+  test("quarantines a transaction whose BEGIN and cleanup outcomes are both uncertain", async () => {
+    const { client, trace } = createSchemaMismatchClient("steward", {
+      beginThrows: true,
+      rollbackThrows: true,
+    });
+
+    await expect(runStewardCoreRepair({ expectedSchema: "public", client })).rejects.toThrow(
+      "transaction start was uncertain",
+    );
+
+    expect(trace).toContain("reserved:unlock");
+    expect(trace).toContain("pooled:end");
+    expect(trace).not.toContain("reserved:release");
+  });
+});
+
+const postgresUrl = process.env.DATABASE_URL;
+const postgresDescribe = postgresUrl ? describe : describe.skip;
+
+postgresDescribe("Steward production core repair on disposable PostgreSQL", () => {
+  const originalUrl = new URL(postgresUrl ?? "postgres://unused.invalid/postgres");
+  const maintenanceUrl = new URL(originalUrl);
+  maintenanceUrl.pathname = "/postgres";
+  maintenanceUrl.searchParams.delete("options");
+  const admin = postgres(maintenanceUrl.toString(), {
+    max: 1,
+    prepare: false,
+    onnotice: () => {},
+  });
+  const databases: string[] = [];
+  const roles: string[] = [];
+
+  afterAll(async () => {
+    for (const database of databases) {
+      await admin.unsafe(
+        `DROP DATABASE IF EXISTS ${quoteStewardCoreRepairIdentifier(database)} WITH (FORCE)`,
+      );
+    }
+    for (const role of roles) {
+      await admin.unsafe(`DROP ROLE IF EXISTS ${quoteStewardCoreRepairIdentifier(role)}`);
+    }
+    await admin.end({ timeout: 5 });
+  });
+
+  async function createUntrustedRole(): Promise<string> {
+    const role = `repair_attacker_${randomUUID().replaceAll("-", "")}`;
+    roles.push(role);
+    await admin.unsafe(`CREATE ROLE ${quoteStewardCoreRepairIdentifier(role)}`);
+    return role;
+  }
+
+  async function createFixture(schema: StewardCoreRepairSchema, include0083 = true) {
+    const database = `steward_core_repair_test_${schema}_${randomUUID().replaceAll("-", "")}`;
+    databases.push(database);
+    await admin.unsafe(`CREATE DATABASE ${quoteStewardCoreRepairIdentifier(database)}`);
+    const targetUrl = new URL(originalUrl);
+    targetUrl.pathname = `/${database}`;
+    const searchPath = schema === "public" ? "public,pg_catalog" : `${schema},public,pg_catalog`;
+    targetUrl.searchParams.set("options", `-c search_path=${searchPath}`);
+    const client = postgres(targetUrl.toString(), {
+      max: 1,
+      prepare: false,
+      onnotice: () => {},
+    });
+    await installHistoricalFloor(
+      client as unknown as StewardCoreRepairExecutor,
+      schema,
+      include0083,
+    );
+    return { client, database };
+  }
+
+  test("rejects a search-path schema that shadows current_schema", async () => {
+    const { client } = await createFixture("public");
+    try {
+      await client.unsafe(`
+        CREATE SCHEMA shadow_test;
+        CREATE FUNCTION shadow_test.current_schema()
+        RETURNS name
+        LANGUAGE sql
+        IMMUTABLE
+        AS $$ SELECT 'public'::name $$;
+        SET search_path TO shadow_test, public, pg_catalog
+      `);
+
+      await expect(
+        inspectStewardCoreRepair({
+          expectedSchema: "public",
+          client: client as unknown as StewardCoreRepairClient,
+        }),
+      ).rejects.toThrow("unsupported core-repair schema shadow_test");
+    } finally {
+      await client.end({ timeout: 5 });
+    }
+  });
+
+  test("rejects an unreviewed CREATE grant on the repair target schema", async () => {
+    const { client } = await createFixture("steward");
+    const role = await createUntrustedRole();
+    try {
+      await client.unsafe(
+        `GRANT CREATE ON SCHEMA steward TO ${quoteStewardCoreRepairIdentifier(role)}`,
+      );
+
+      await expect(
+        inspectStewardCoreRepair({
+          expectedSchema: "steward",
+          client: client as unknown as StewardCoreRepairClient,
+        }),
+      ).rejects.toThrow("target schema grants CREATE to an unreviewed role");
+    } finally {
+      await client.end({ timeout: 5 });
+    }
+  });
+
+  test("rejects target-schema objects owned by an unreviewed role", async () => {
+    const { client } = await createFixture("steward");
+    const role = await createUntrustedRole();
+    const quotedRole = quoteStewardCoreRepairIdentifier(role);
+    try {
+      await client.unsafe(`
+        GRANT USAGE, CREATE ON SCHEMA steward TO ${quotedRole};
+        SET ROLE ${quotedRole};
+        CREATE FUNCTION steward.lower(text)
+        RETURNS text
+        LANGUAGE sql
+        IMMUTABLE
+        AS $$ SELECT 'shadowed'::text $$;
+        RESET ROLE;
+        REVOKE USAGE, CREATE ON SCHEMA steward FROM ${quotedRole};
+      `);
+
+      await expect(
+        inspectStewardCoreRepair({
+          expectedSchema: "steward",
+          client: client as unknown as StewardCoreRepairClient,
+        }),
+      ).rejects.toThrow("target schema contains objects owned by an unreviewed role");
+    } finally {
+      await client.end({ timeout: 5 });
+    }
+  });
+
+  test("rejects target-schema types owned by an unreviewed role", async () => {
+    const { client } = await createFixture("steward");
+    const role = await createUntrustedRole();
+    const quotedRole = quoteStewardCoreRepairIdentifier(role);
+    try {
+      await client.unsafe(`
+        GRANT USAGE, CREATE ON SCHEMA steward TO ${quotedRole};
+        SET ROLE ${quotedRole};
+        CREATE TYPE steward.shadow_enum AS ENUM ('shadowed');
+        RESET ROLE;
+        REVOKE USAGE, CREATE ON SCHEMA steward FROM ${quotedRole};
+      `);
+
+      await expect(
+        inspectStewardCoreRepair({
+          expectedSchema: "steward",
+          client: client as unknown as StewardCoreRepairClient,
+        }),
+      ).rejects.toThrow("target schema contains objects owned by an unreviewed role");
+    } finally {
+      await client.end({ timeout: 5 });
+    }
+  });
+
+  test("rejects target-object grants that can preinstall or invoke unreviewed behavior", async () => {
+    const { client } = await createFixture("steward");
+    const role = await createUntrustedRole();
+    const quotedRole = quoteStewardCoreRepairIdentifier(role);
+    const inspect = () =>
+      inspectStewardCoreRepair({
+        expectedSchema: "steward",
+        client: client as unknown as StewardCoreRepairClient,
+      });
+    try {
+      await client.unsafe(`GRANT TRIGGER ON steward.agents TO ${quotedRole}`);
+      await expect(inspect()).rejects.toThrow(
+        "target objects grant privileges to an unreviewed role",
+      );
+      await client.unsafe(`REVOKE TRIGGER ON steward.agents FROM ${quotedRole}`);
+
+      await client.unsafe(`GRANT UPDATE (name) ON steward.agents TO ${quotedRole}`);
+      await expect(inspect()).rejects.toThrow(
+        "target objects grant privileges to an unreviewed role",
+      );
+      await client.unsafe(`REVOKE UPDATE (name) ON steward.agents FROM ${quotedRole}`);
+
+      await client.unsafe(
+        `GRANT EXECUTE ON FUNCTION steward.steward_provider_action_binding_guard() TO ${quotedRole}`,
+      );
+      await expect(inspect()).rejects.toThrow(
+        "target objects grant privileges to an unreviewed role",
+      );
+    } finally {
+      await client.end({ timeout: 5 });
+    }
+  });
+
+  test("rejects a revoked-grant trigger backed by an attacker-owned external function", async () => {
+    const { client } = await createFixture("steward");
+    const role = await createUntrustedRole();
+    const quotedRole = quoteStewardCoreRepairIdentifier(role);
+    try {
+      await client.unsafe(`
+        GRANT USAGE ON SCHEMA steward TO ${quotedRole};
+        GRANT CREATE ON SCHEMA public TO ${quotedRole};
+        GRANT TRIGGER ON steward.agents TO ${quotedRole};
+        SET ROLE ${quotedRole};
+        CREATE FUNCTION public.steward_repair_attacker_trigger()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+          NEW.name := 'attacker-rewritten';
+          RETURN NEW;
+        END
+        $$;
+        CREATE TRIGGER steward_repair_attacker_trigger
+        BEFORE UPDATE ON steward.agents
+        FOR EACH ROW
+        EXECUTE FUNCTION public.steward_repair_attacker_trigger();
+        RESET ROLE;
+        REVOKE TRIGGER ON steward.agents FROM ${quotedRole};
+        REVOKE USAGE ON SCHEMA steward FROM ${quotedRole};
+        REVOKE CREATE ON SCHEMA public FROM ${quotedRole};
+
+        INSERT INTO steward.tenants (id, name, api_key_hash)
+        VALUES ('tenant-trigger-attack', 'Trigger attack', 'trigger-attack-key');
+        INSERT INTO steward.agents (id, tenant_id, name, wallet_address)
+        VALUES (
+          'agent-trigger-attack',
+          'tenant-trigger-attack',
+          'Before update',
+          '0x4444444444444444444444444444444444444444'
+        );
+        UPDATE steward.agents
+        SET name = 'Expected update'
+        WHERE id = 'agent-trigger-attack';
+      `);
+      const exploit = await client.unsafe<
+        { name: string; function_owner: string; trigger_count: number }[]
+      >(`
+        SELECT
+          agent.name,
+          pg_catalog.pg_get_userbyid(procedure.proowner)::text AS function_owner,
+          (
+            SELECT count(*)::int
+            FROM pg_catalog.pg_trigger trigger_record
+            WHERE trigger_record.tgrelid = 'steward.agents'::regclass
+              AND trigger_record.tgname = 'steward_repair_attacker_trigger'
+              AND NOT trigger_record.tgisinternal
+          ) AS trigger_count
+        FROM steward.agents agent
+        JOIN pg_catalog.pg_proc procedure
+          ON procedure.oid = 'public.steward_repair_attacker_trigger()'::regprocedure
+        WHERE agent.id = 'agent-trigger-attack'
+      `);
+      expect(exploit).toEqual([
+        { name: "attacker-rewritten", function_owner: role, trigger_count: 1 },
+      ]);
+
+      await expect(
+        inspectStewardCoreRepair({
+          expectedSchema: "steward",
+          client: client as unknown as StewardCoreRepairClient,
+        }),
+      ).rejects.toThrow("core-repair target contains an unreviewed trigger");
+
+      await expect(
+        runStewardCoreRepair({
+          expectedSchema: "steward",
+          client: client as unknown as StewardCoreRepairClient,
+        }),
+      ).rejects.toThrow("core-repair target contains an unreviewed trigger");
+
+      const repairState = await client.unsafe<
+        { version_exists: boolean; ledger_exists: boolean }[]
+      >(`
+        SELECT
+          EXISTS (
+            SELECT 1 FROM pg_catalog.pg_attribute attribute
+            JOIN pg_catalog.pg_class relation ON relation.oid = attribute.attrelid
+            WHERE relation.oid = 'steward.execution_authorization_nonces'::regclass
+              AND attribute.attname = 'version'
+              AND attribute.attnum > 0 AND NOT attribute.attisdropped
+          ) AS version_exists,
+          pg_catalog.to_regclass('steward.${STEWARD_CORE_REPAIR_LEDGER}') IS NOT NULL
+            AS ledger_exists
+      `);
+      expect(repairState).toEqual([{ version_exists: false, ledger_exists: false }]);
+    } finally {
+      await client.end({ timeout: 5 });
+    }
+  });
+
+  test("rejects an unexpected runtime-owned trigger outside the reviewed baseline", async () => {
+    const { client } = await createFixture("steward");
+    try {
+      await client.unsafe(`
+        CREATE FUNCTION steward.steward_repair_unreviewed_trigger()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+          RETURN NEW;
+        END
+        $$;
+        CREATE TRIGGER steward_repair_unreviewed_trigger
+        BEFORE UPDATE ON steward.agents
+        FOR EACH ROW
+        EXECUTE FUNCTION steward.steward_repair_unreviewed_trigger();
+      `);
+
+      const expectedError = "pre-repair noninternal-trigger exact catalog envelope mismatch";
+      await expect(
+        inspectStewardCoreRepair({
+          expectedSchema: "steward",
+          client: client as unknown as StewardCoreRepairClient,
+        }),
+      ).rejects.toThrow(expectedError);
+      await expect(
+        runStewardCoreRepair({
+          expectedSchema: "steward",
+          client: client as unknown as StewardCoreRepairClient,
+        }),
+      ).rejects.toThrow(expectedError);
+
+      const repairState = await client.unsafe<
+        { version_exists: boolean; ledger_exists: boolean }[]
+      >(`
+        SELECT
+          EXISTS (
+            SELECT 1 FROM pg_catalog.pg_attribute attribute
+            JOIN pg_catalog.pg_class relation ON relation.oid = attribute.attrelid
+            WHERE relation.oid = 'steward.execution_authorization_nonces'::regclass
+              AND attribute.attname = 'version'
+              AND attribute.attnum > 0 AND NOT attribute.attisdropped
+          ) AS version_exists,
+          pg_catalog.to_regclass('steward.${STEWARD_CORE_REPAIR_LEDGER}') IS NOT NULL
+            AS ledger_exists
+      `);
+      expect(repairState).toEqual([{ version_exists: false, ledger_exists: false }]);
+    } finally {
+      await client.end({ timeout: 5 });
+    }
+  });
+
+  test("rejects a same-count rewire to another runtime-owned trigger function", async () => {
+    const { client } = await createFixture("steward");
+    try {
+      await client.unsafe(`
+        DROP TRIGGER provider_accounts_immutable_owner ON steward.provider_accounts;
+        CREATE TRIGGER provider_accounts_immutable_owner
+        BEFORE UPDATE ON steward.provider_accounts
+        FOR EACH ROW
+        EXECUTE FUNCTION steward.steward_provider_action_binding_guard();
+      `);
+
+      const expectedError = "pre-repair noninternal-trigger exact catalog envelope mismatch";
+      await expect(
+        inspectStewardCoreRepair({
+          expectedSchema: "steward",
+          client: client as unknown as StewardCoreRepairClient,
+        }),
+      ).rejects.toThrow(expectedError);
+      await expect(
+        runStewardCoreRepair({
+          expectedSchema: "steward",
+          client: client as unknown as StewardCoreRepairClient,
+        }),
+      ).rejects.toThrow(expectedError);
+
+      const repairState = await client.unsafe<
+        { trigger_count: number; version_exists: boolean; ledger_exists: boolean }[]
+      >(`
+        SELECT
+          (
+            SELECT count(*)::int
+            FROM pg_catalog.pg_trigger trigger_record
+            JOIN pg_catalog.pg_class relation ON relation.oid = trigger_record.tgrelid
+            JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+            WHERE namespace.nspname = 'steward'
+              AND NOT trigger_record.tgisinternal
+          ) AS trigger_count,
+          EXISTS (
+            SELECT 1 FROM pg_catalog.pg_attribute attribute
+            JOIN pg_catalog.pg_class relation ON relation.oid = attribute.attrelid
+            WHERE relation.oid = 'steward.execution_authorization_nonces'::regclass
+              AND attribute.attname = 'version'
+              AND attribute.attnum > 0 AND NOT attribute.attisdropped
+          ) AS version_exists,
+          pg_catalog.to_regclass('steward.${STEWARD_CORE_REPAIR_LEDGER}') IS NOT NULL
+            AS ledger_exists
+      `);
+      expect(repairState).toEqual([
+        { trigger_count: 7, version_exists: false, ledger_exists: false },
+      ]);
+    } finally {
+      await client.end({ timeout: 5 });
+    }
+  });
+
+  test("rejects a runtime-owned bound trigger function body outside the reviewed baseline", async () => {
+    const { client } = await createFixture("steward");
+    try {
+      await client.unsafe(`
+        CREATE OR REPLACE FUNCTION steward.steward_reject_provider_scope_move()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+          RETURN NEW;
+        END
+        $$;
+      `);
+
+      const expectedError = "pre-repair bound-trigger-function exact catalog envelope mismatch";
+      await expect(
+        inspectStewardCoreRepair({
+          expectedSchema: "steward",
+          client: client as unknown as StewardCoreRepairClient,
+        }),
+      ).rejects.toThrow(expectedError);
+      await expect(
+        runStewardCoreRepair({
+          expectedSchema: "steward",
+          client: client as unknown as StewardCoreRepairClient,
+        }),
+      ).rejects.toThrow(expectedError);
+
+      const repairState = await client.unsafe<
+        { version_exists: boolean; new_relation_exists: boolean; ledger_exists: boolean }[]
+      >(`
+        SELECT
+          EXISTS (
+            SELECT 1 FROM pg_catalog.pg_attribute attribute
+            JOIN pg_catalog.pg_class relation ON relation.oid = attribute.attrelid
+            WHERE relation.oid = 'steward.execution_authorization_nonces'::regclass
+              AND attribute.attname = 'version'
+              AND attribute.attnum > 0 AND NOT attribute.attisdropped
+          ) AS version_exists,
+          pg_catalog.to_regclass('steward.provider_action_reservation_generations') IS NOT NULL
+            AS new_relation_exists,
+          pg_catalog.to_regclass('steward.${STEWARD_CORE_REPAIR_LEDGER}') IS NOT NULL
+            AS ledger_exists
+      `);
+      expect(repairState).toEqual([
+        { version_exists: false, new_relation_exists: false, ledger_exists: false },
+      ]);
+    } finally {
+      await client.end({ timeout: 5 });
+    }
+  });
+
+  test("rejects an enabled event trigger before reviewed repair DDL can run", async () => {
+    const { client } = await createFixture("steward");
+    try {
+      await client.unsafe(`
+        CREATE FUNCTION public.steward_repair_ledger_trigger_injector()
+        RETURNS event_trigger
+        LANGUAGE plpgsql
+        AS $$
+        DECLARE
+          ddl_command record;
+        BEGIN
+          FOR ddl_command IN SELECT * FROM pg_catalog.pg_event_trigger_ddl_commands()
+          LOOP
+            IF ddl_command.command_tag = 'CREATE TABLE'
+              AND ddl_command.object_identity =
+                'steward.${STEWARD_CORE_REPAIR_LEDGER}'
+            THEN
+              EXECUTE 'CREATE TRIGGER steward_repair_ledger_injected_trigger
+                BEFORE UPDATE ON steward.agents
+                FOR EACH ROW
+                EXECUTE FUNCTION steward.steward_provider_action_binding_guard()';
+            END IF;
+          END LOOP;
+        END
+        $$;
+        CREATE EVENT TRIGGER steward_repair_ledger_trigger_injector
+        ON ddl_command_end
+        WHEN TAG IN ('CREATE TABLE')
+        EXECUTE FUNCTION public.steward_repair_ledger_trigger_injector();
+      `);
+
+      const expectedError = "core-repair database contains an enabled event trigger";
+      await expect(
+        inspectStewardCoreRepair({
+          expectedSchema: "steward",
+          client: client as unknown as StewardCoreRepairClient,
+        }),
+      ).rejects.toThrow(expectedError);
+      await expect(
+        runStewardCoreRepair({
+          expectedSchema: "steward",
+          client: client as unknown as StewardCoreRepairClient,
+        }),
+      ).rejects.toThrow(expectedError);
+
+      const repairState = await client.unsafe<
+        {
+          version_exists: boolean;
+          new_relation_exists: boolean;
+          ledger_exists: boolean;
+          injected_trigger_exists: boolean;
+        }[]
+      >(`
+        SELECT
+          EXISTS (
+            SELECT 1 FROM pg_catalog.pg_attribute attribute
+            JOIN pg_catalog.pg_class relation ON relation.oid = attribute.attrelid
+            WHERE relation.oid = 'steward.execution_authorization_nonces'::regclass
+              AND attribute.attname = 'version'
+              AND attribute.attnum > 0 AND NOT attribute.attisdropped
+          ) AS version_exists,
+          pg_catalog.to_regclass('steward.provider_action_reservation_generations') IS NOT NULL
+            AS new_relation_exists,
+          pg_catalog.to_regclass('steward.${STEWARD_CORE_REPAIR_LEDGER}') IS NOT NULL
+            AS ledger_exists,
+          EXISTS (
+            SELECT 1
+            FROM pg_catalog.pg_trigger trigger_record
+            WHERE trigger_record.tgrelid = 'steward.agents'::regclass
+              AND trigger_record.tgname = 'steward_repair_ledger_injected_trigger'
+              AND NOT trigger_record.tgisinternal
+          ) AS injected_trigger_exists
+      `);
+      expect(repairState).toEqual([
+        {
+          version_exists: false,
+          new_relation_exists: false,
+          ledger_exists: false,
+          injected_trigger_exists: false,
+        },
+      ]);
+    } finally {
+      await client.end({ timeout: 5 });
+    }
+  });
+
+  test("rejects a runtime-owned bound trigger function body after repair", async () => {
+    const { client } = await createFixture("steward");
+    try {
+      const first = await runStewardCoreRepair({
+        expectedSchema: "steward",
+        client: client as unknown as StewardCoreRepairClient,
+      });
+      expect(first.status).toBe("applied");
+
+      await client.unsafe(`
+        CREATE OR REPLACE FUNCTION steward.steward_reject_provider_scope_move()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+          RETURN NEW;
+        END
+        $$;
+      `);
+
+      await expect(
+        runStewardCoreRepair({
+          expectedSchema: "steward",
+          client: client as unknown as StewardCoreRepairClient,
+        }),
+      ).rejects.toThrow("already-applied bound-trigger-function exact catalog envelope mismatch");
+      await expect(
+        inspectStewardCoreRepair({
+          expectedSchema: "steward",
+          client: client as unknown as StewardCoreRepairClient,
+        }),
+      ).rejects.toThrow("already-applied bound-trigger-function exact catalog envelope mismatch");
+      await expect(
+        inspectStewardReleaseReadiness({
+          expectedSchema: "steward",
+          client: client as unknown as StewardReleaseReadinessClient,
+        }),
+      ).rejects.toThrow("release-readiness bound-trigger-function exact catalog envelope mismatch");
+    } finally {
+      await client.end({ timeout: 5 });
+    }
+  });
+
+  for (const defaultPrivilege of ["table", "function"] as const) {
+    test(`rolls back the repair when runtime default ${defaultPrivilege} privileges grant new objects to a third party`, async () => {
+      const { client } = await createFixture("steward");
+      const role = await createUntrustedRole();
+      const quotedRole = quoteStewardCoreRepairIdentifier(role);
+      const grant =
+        defaultPrivilege === "table"
+          ? `ALTER DEFAULT PRIVILEGES IN SCHEMA steward
+               GRANT UPDATE, TRIGGER ON TABLES TO ${quotedRole}`
+          : `ALTER DEFAULT PRIVILEGES IN SCHEMA steward
+               GRANT EXECUTE ON FUNCTIONS TO ${quotedRole}`;
+      const revoke =
+        defaultPrivilege === "table"
+          ? `ALTER DEFAULT PRIVILEGES IN SCHEMA steward
+               REVOKE UPDATE, TRIGGER ON TABLES FROM ${quotedRole}`
+          : `ALTER DEFAULT PRIVILEGES IN SCHEMA steward
+               REVOKE EXECUTE ON FUNCTIONS FROM ${quotedRole}`;
+      try {
+        await client.unsafe(grant);
+
+        await expect(
+          runStewardCoreRepair({
+            expectedSchema: "steward",
+            client: client as unknown as StewardCoreRepairClient,
+          }),
+        ).rejects.toThrow("target objects grant privileges to an unreviewed role");
+
+        const state = await client.unsafe<
+          {
+            version_exists: boolean;
+            new_relation_exists: boolean;
+            ledger_exists: boolean;
+          }[]
+        >(`
+          SELECT
+            EXISTS (
+              SELECT 1 FROM pg_catalog.pg_attribute attribute
+              JOIN pg_catalog.pg_class relation ON relation.oid = attribute.attrelid
+              WHERE relation.oid = 'steward.execution_authorization_nonces'::regclass
+                AND attribute.attname = 'version'
+                AND attribute.attnum > 0 AND NOT attribute.attisdropped
+            ) AS version_exists,
+            pg_catalog.to_regclass('steward.provider_action_reservation_generations') IS NOT NULL
+              AS new_relation_exists,
+            pg_catalog.to_regclass('steward.${STEWARD_CORE_REPAIR_LEDGER}') IS NOT NULL
+              AS ledger_exists
+        `);
+        expect(state).toEqual([
+          { version_exists: false, new_relation_exists: false, ledger_exists: false },
+        ]);
+      } finally {
+        await client.unsafe(revoke);
+        await client.end({ timeout: 5 });
+      }
+    });
+  }
+
+  test("keeps pg_catalog ahead of a runtime-owned target-schema builtin shadow", async () => {
+    const { client } = await createFixture("steward");
+    try {
+      await client.unsafe(`
+        CREATE FUNCTION steward.lower(text)
+        RETURNS text
+        LANGUAGE sql
+        IMMUTABLE
+        AS $$ SELECT 'shadowed'::text $$;
+        INSERT INTO steward.tenants (id, name, api_key_hash)
+        VALUES ('tenant-shadow-fixture', 'Shadow fixture', 'shadow-fixture-key');
+        INSERT INTO steward.agents (id, tenant_id, name, wallet_address)
+        VALUES (
+          'agent-shadow-fixture',
+          'tenant-shadow-fixture',
+          'Shadow fixture',
+          '0x3333333333333333333333333333333333333333'
+        );
+        INSERT INTO steward.evm_wallet_nonces (wallet_address, chain_id, next_nonce)
+        VALUES ('0x3333333333333333333333333333333333333333', 1, 1);
+      `);
+
+      const inspection = await inspectStewardCoreRepair({
+        expectedSchema: "steward",
+        client: client as unknown as StewardCoreRepairClient,
+      });
+
+      expect(inspection.status).toBe("eligible");
+      expect(inspection.preflight?.evmNonceNamespaces).toBe(1);
+      expect(inspection.preflight?.unresolvedEvmNonceNamespaces).toBe(0);
+    } finally {
+      await client.end({ timeout: 5 });
+    }
+  });
+
+  test("repairs a published nonce table and installs its durable replica identity", async () => {
+    const { client } = await createFixture("steward");
+    try {
+      await client.unsafe(`
+        CREATE PUBLICATION steward_core_repair_nonce_updates
+          FOR TABLE steward.evm_wallet_nonce_inflight
+          WITH (publish = 'update');
+        INSERT INTO steward.tenants (id, name, api_key_hash)
+        VALUES ('tenant-replica-fixture', 'Replica fixture', 'replica-fixture-key');
+        INSERT INTO steward.agents (id, tenant_id, name, wallet_address)
+        VALUES (
+          'agent-replica-fixture',
+          'tenant-replica-fixture',
+          'Replica fixture',
+          '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+        );
+        INSERT INTO steward.evm_wallet_nonce_inflight (
+          wallet_address, chain_id, nonce, state
+        ) VALUES (
+          '0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', 1, 9, 'allocated'
+        );
+      `);
+      const before = await client.unsafe<{ replica_identity: string; has_primary_key: boolean }[]>(`
+        SELECT
+          relation.relreplident AS replica_identity,
+          EXISTS (
+            SELECT 1 FROM pg_catalog.pg_index replica_index
+            WHERE replica_index.indrelid = relation.oid AND replica_index.indisprimary
+          ) AS has_primary_key
+        FROM pg_catalog.pg_class relation
+        WHERE relation.oid = 'steward.evm_wallet_nonce_inflight'::regclass
+      `);
+      expect(before).toEqual([{ replica_identity: "d", has_primary_key: false }]);
+
+      const result = await runStewardCoreRepair({
+        expectedSchema: "steward",
+        client: client as unknown as StewardCoreRepairClient,
+      });
+      expect(result.status).toBe("applied");
+
+      const after = await client.unsafe<
+        {
+          replica_identity: string;
+          replica_index_selected: boolean;
+          wallet_address: string;
+          tenant_id: string;
+        }[]
+      >(`
+        SELECT
+          relation.relreplident AS replica_identity,
+          replica_index.indisreplident AS replica_index_selected,
+          inflight.wallet_address,
+          inflight.tenant_id
+        FROM steward.evm_wallet_nonce_inflight inflight
+        CROSS JOIN pg_catalog.pg_class relation
+        CROSS JOIN pg_catalog.pg_index replica_index
+        WHERE relation.oid = 'steward.evm_wallet_nonce_inflight'::regclass
+          AND replica_index.indrelid = relation.oid
+          AND replica_index.indexrelid =
+            'steward.evm_wallet_nonce_inflight_key_idx'::regclass
+      `);
+      expect(after).toEqual([
+        {
+          replica_identity: "i",
+          replica_index_selected: true,
+          wallet_address: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          tenant_id: "tenant-replica-fixture",
+        },
+      ]);
+      const postRepairUpdate = await client.unsafe<{ state: string }[]>(`
+        UPDATE steward.evm_wallet_nonce_inflight
+        SET state = 'broadcast', updated_at = clock_timestamp()
+        WHERE wallet_address = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+          AND chain_id = 1 AND nonce = 9
+        RETURNING state
+      `);
+      expect(postRepairUpdate).toEqual([{ state: "broadcast" }]);
+    } finally {
+      await client.end({ timeout: 5 });
+    }
+  });
+
+  for (const schema of ["public", "steward"] as const) {
+    test(`repairs the ${schema} discontinuity atomically and preserves the shared ledger`, async () => {
+      const { client } = await createFixture(schema);
+      const quotedSchema = quoteStewardCoreRepairIdentifier(schema);
+      try {
+        await client.unsafe(`
+          CREATE SCHEMA drizzle;
+          CREATE TABLE drizzle.__drizzle_migrations (
+            id serial PRIMARY KEY,
+            hash text NOT NULL,
+            created_at bigint
+          );
+          INSERT INTO drizzle.__drizzle_migrations (hash, created_at)
+          VALUES ('shared-eliza-sentinel', 1793072800004);
+          INSERT INTO ${quotedSchema}.tenants (id, name, api_key_hash)
+          VALUES ('tenant-repair-fixture', 'Repair fixture', 'fixture-key');
+          INSERT INTO ${quotedSchema}.agents (id, tenant_id, name, wallet_address)
+          VALUES (
+            'agent-repair-fixture',
+            'tenant-repair-fixture',
+            'Repair fixture',
+            '0x1111111111111111111111111111111111111111'
+          );
+          INSERT INTO ${quotedSchema}.evm_wallet_nonces (wallet_address, chain_id, next_nonce)
+          VALUES ('0x1111111111111111111111111111111111111111', 1, 7);
+        `);
+
+        const inspection = await inspectStewardCoreRepair({
+          expectedSchema: schema,
+          client: client as unknown as StewardCoreRepairClient,
+        });
+        expect(inspection.status).toBe("eligible");
+        expect(inspection.preflight?.evmNonceNamespaces).toBe(1);
+        const dryRunState = await client.unsafe<
+          {
+            version_exists: boolean;
+            ledger_exists: boolean;
+          }[]
+        >(`
+          SELECT
+            EXISTS (
+              SELECT 1 FROM pg_catalog.pg_attribute attribute
+              JOIN pg_catalog.pg_class relation ON relation.oid = attribute.attrelid
+              WHERE relation.oid = '${schema}.execution_authorization_nonces'::regclass
+                AND attribute.attname = 'version'
+                AND attribute.attnum > 0 AND NOT attribute.attisdropped
+            ) AS version_exists,
+            to_regclass('${schema}.${STEWARD_CORE_REPAIR_LEDGER}') IS NOT NULL AS ledger_exists
+        `);
+        expect(dryRunState).toEqual([{ version_exists: false, ledger_exists: false }]);
+
+        const first = await runStewardCoreRepair({
+          expectedSchema: schema,
+          client: client as unknown as StewardCoreRepairClient,
+        });
+        expect(first.status).toBe("applied");
+        expect(first.applied).toHaveLength(28);
+        expect(first.verifiedExisting).toEqual(["0083_provider_approval_quorum"]);
+        expect(first.preflight).toEqual({
+          executionReadyWithoutPolicyEvidence: 0,
+          externalCustodyNoncesWithoutIdentityDigest: 0,
+          googleOperationsNeedingRiskUpgrade: 0,
+          evmNonceNamespaces: 1,
+          unresolvedEvmNonceNamespaces: 0,
+        });
+        const systemCatalogLeak = await client.unsafe<{ leaked_relation: string | null }[]>(`
+          SELECT pg_catalog.to_regclass(
+            'pg_catalog.provider_action_reservation_generations'
+          )::text AS leaked_relation
+        `);
+        expect(systemCatalogLeak).toEqual([{ leaked_relation: null }]);
+        const advisoryLocks = await client.unsafe<{ count: number }[]>(`
+          SELECT count(*)::int AS count
+          FROM pg_catalog.pg_locks
+          WHERE locktype = 'advisory' AND pid = pg_backend_pid()
+        `);
+        expect(advisoryLocks).toEqual([{ count: 0 }]);
+
+        const ledger = await client.unsafe<
+          {
+            migration_order: number;
+            tag: string;
+            action: string;
+            source_hash: string;
+            rendered_hash: string;
+            bundle_hash: string;
+          }[]
+        >(`
+          SELECT migration_order, tag, action, source_hash, rendered_hash, bundle_hash
+          FROM ${quotedSchema}.${quoteStewardCoreRepairIdentifier(STEWARD_CORE_REPAIR_LEDGER)}
+          ORDER BY migration_order
+        `);
+        expect(ledger).toHaveLength(29);
+        expect(ledger[1]?.tag).toBe("0083_provider_approval_quorum");
+        expect(ledger[1]?.action).toBe("verified_existing");
+        expect(new Set(ledger.map((row) => row.bundle_hash))).toEqual(new Set([first.bundleHash]));
+        for (const row of ledger) {
+          expect(row.source_hash).toMatch(/^[0-9a-f]{64}$/);
+          expect(row.rendered_hash).toMatch(/^[0-9a-f]{64}$/);
+        }
+
+        const sharedLedger = await client.unsafe<{ hash: string; created_at: string }[]>(
+          "SELECT hash, created_at FROM drizzle.__drizzle_migrations ORDER BY id",
+        );
+        expect(sharedLedger).toEqual([
+          { hash: "shared-eliza-sentinel", created_at: "1793072800004" },
+        ]);
+
+        const nonceOwner = await client.unsafe<
+          {
+            tenant_id: string;
+            wallet_address: string;
+            chain_id: number;
+          }[]
+        >(`
+          SELECT tenant_id, wallet_address, chain_id
+          FROM ${quotedSchema}.evm_wallet_nonce_owners
+        `);
+        expect(nonceOwner).toEqual([
+          {
+            tenant_id: "tenant-repair-fixture",
+            wallet_address: "0x1111111111111111111111111111111111111111",
+            chain_id: 1,
+          },
+        ]);
+
+        const outcomeUnknown = await client.unsafe<{ count: number }[]>(`
+          SELECT count(*)::int AS count
+          FROM pg_catalog.pg_type type_record
+          JOIN pg_catalog.pg_namespace namespace ON namespace.oid = type_record.typnamespace
+          JOIN pg_catalog.pg_enum enum_record ON enum_record.enumtypid = type_record.oid
+          WHERE namespace.nspname = '${schema}'
+            AND type_record.typname = 'transaction_status'
+            AND enum_record.enumlabel = 'outcome_unknown'
+        `);
+        expect(outcomeUnknown).toEqual([{ count: 1 }]);
+
+        const functions = await client.unsafe<{ function_name: string; settings: string }[]>(`
+          SELECT
+            procedure.proname AS function_name,
+            COALESCE(array_to_string(procedure.proconfig, ','), '') AS settings
+          FROM pg_catalog.pg_proc procedure
+          JOIN pg_catalog.pg_namespace namespace ON namespace.oid = procedure.pronamespace
+          WHERE namespace.nspname = '${schema}'
+            AND procedure.proname IN (
+              'steward_lock_tenant_deletion',
+              'steward_fence_agent_authority_creation',
+              'steward_fence_upstream_lease_workspace',
+              'steward_fence_provider_action_intent_tenant',
+              'steward_fence_provider_action_agent',
+              'steward_guard_agent_delete',
+              'steward_guard_workspace_delete'
+            )
+          ORDER BY procedure.proname
+        `);
+        expect(functions).toHaveLength(7);
+        for (const fn of functions) {
+          expect(fn.settings).toContain(`search_path=pg_catalog, ${schema}`);
+        }
+
+        const second = await runStewardCoreRepair({
+          expectedSchema: schema,
+          client: client as unknown as StewardCoreRepairClient,
+        });
+        expect(second).toEqual({
+          status: "already_applied",
+          schema,
+          bundleHash: first.bundleHash,
+          applied: [],
+          verifiedExisting: ["0083_provider_approval_quorum"],
+          preflight: null,
+        });
+
+        await client.unsafe(`
+          CREATE FUNCTION ${quotedSchema}.steward_repair_post_unreviewed_trigger()
+          RETURNS trigger
+          LANGUAGE plpgsql
+          AS $$
+          BEGIN
+            RETURN NEW;
+          END
+          $$;
+          CREATE TRIGGER steward_repair_post_unreviewed_trigger
+          BEFORE UPDATE ON ${quotedSchema}.agents
+          FOR EACH ROW
+          EXECUTE FUNCTION ${quotedSchema}.steward_repair_post_unreviewed_trigger();
+        `);
+        await expect(
+          runStewardCoreRepair({
+            expectedSchema: schema,
+            client: client as unknown as StewardCoreRepairClient,
+          }),
+        ).rejects.toThrow("already-applied noninternal-trigger exact catalog envelope mismatch");
+        await expect(
+          inspectStewardCoreRepair({
+            expectedSchema: schema,
+            client: client as unknown as StewardCoreRepairClient,
+          }),
+        ).rejects.toThrow("already-applied noninternal-trigger exact catalog envelope mismatch");
+        await expect(
+          inspectStewardReleaseReadiness({
+            expectedSchema: schema,
+            client: client as unknown as StewardReleaseReadinessClient,
+          }),
+        ).rejects.toThrow("release-readiness noninternal-trigger exact catalog envelope mismatch");
+        await client.unsafe(`
+          DROP TRIGGER steward_repair_post_unreviewed_trigger ON ${quotedSchema}.agents;
+          DROP FUNCTION ${quotedSchema}.steward_repair_post_unreviewed_trigger();
+        `);
+
+        await runStewardSchemaMigrations({
+          client: client as unknown as StewardSchemaMigrationClient,
+          expectedSchema: schema,
+          useAdvisoryLock: false,
+        });
+        const releaseReadiness = await inspectStewardReleaseReadiness({
+          expectedSchema: schema,
+          client: client as unknown as StewardReleaseReadinessClient,
+        });
+        expect(releaseReadiness).toMatchObject({
+          status: "ready",
+          schema,
+          core: { status: "already_applied", schema },
+          authSchema: {
+            status: "ready",
+            schema,
+            expectedCount: getStewardSchemaMigrationExpectations().length,
+            appliedCount: getStewardSchemaMigrationExpectations().length,
+            forwardCount: 0,
+            expectedTip: "0001_passkey_rp_provenance_0114",
+            rpProvenance: true,
+          },
+        });
+
+        // A physically missing RP provenance column must fail readiness even
+        // while both Steward-owned marker chains and the unrelated shared
+        // Eliza ledger remain present and unchanged.
+        await client.unsafe(`ALTER TABLE ${quotedSchema}.authenticators DROP COLUMN rp_id`);
+        await expect(
+          inspectStewardReleaseReadiness({
+            expectedSchema: schema,
+            client: client as unknown as StewardReleaseReadinessClient,
+          }),
+        ).rejects.toThrow(/authenticators\.rp_id/);
+
+        const sharedLedgerAfterReadiness = await client.unsafe<
+          { hash: string; created_at: string }[]
+        >("SELECT hash, created_at FROM drizzle.__drizzle_migrations ORDER BY id");
+        expect(sharedLedgerAfterReadiness).toEqual([
+          { hash: "shared-eliza-sentinel", created_at: "1793072800004" },
+        ]);
+      } finally {
+        await client.end({ timeout: 5 });
+      }
+    });
+  }
+
+  test("fails closed when 0083 is absent and leaves 0082 unapplied", async () => {
+    const { client } = await createFixture("public", false);
+    try {
+      await expect(
+        runStewardCoreRepair({
+          expectedSchema: "public",
+          client: client as unknown as StewardCoreRepairClient,
+        }),
+      ).rejects.toThrow(
+        /0083 existing-state exact catalog envelope mismatch|0082-absent\/0083-present/,
+      );
+
+      const state = await client.unsafe<
+        {
+          version_exists: boolean;
+          ledger_exists: boolean;
+        }[]
+      >(`
+        SELECT
+          EXISTS (
+            SELECT 1 FROM pg_catalog.pg_attribute attribute
+            JOIN pg_catalog.pg_class relation ON relation.oid = attribute.attrelid
+            WHERE relation.oid = 'public.execution_authorization_nonces'::regclass
+              AND attribute.attname = 'version'
+              AND attribute.attnum > 0 AND NOT attribute.attisdropped
+          ) AS version_exists,
+          to_regclass('public.${STEWARD_CORE_REPAIR_LEDGER}') IS NOT NULL AS ledger_exists
+      `);
+      expect(state).toEqual([{ version_exists: false, ledger_exists: false }]);
+    } finally {
+      await client.end({ timeout: 5 });
+    }
+  });
+
+  test("fails closed on an unresolved nonce namespace before any DDL is retained", async () => {
+    const { client } = await createFixture("steward");
+    try {
+      await client.unsafe(`
+        INSERT INTO steward.evm_wallet_nonces (wallet_address, chain_id, next_nonce)
+        VALUES ('0x2222222222222222222222222222222222222222', 1, 1)
+      `);
+      await expect(
+        runStewardCoreRepair({
+          expectedSchema: "steward",
+          client: client as unknown as StewardCoreRepairClient,
+        }),
+      ).rejects.toThrow("data preflight differs from the reviewed production envelope");
+
+      const state = await client.unsafe<
+        {
+          version_exists: boolean;
+          ledger_exists: boolean;
+        }[]
+      >(`
+        SELECT
+          EXISTS (
+            SELECT 1 FROM pg_catalog.pg_attribute attribute
+            JOIN pg_catalog.pg_class relation ON relation.oid = attribute.attrelid
+            WHERE relation.oid = 'steward.execution_authorization_nonces'::regclass
+              AND attribute.attname = 'version'
+              AND attribute.attnum > 0 AND NOT attribute.attisdropped
+          ) AS version_exists,
+          to_regclass('steward.${STEWARD_CORE_REPAIR_LEDGER}') IS NOT NULL AS ledger_exists
+      `);
+      expect(state).toEqual([{ version_exists: false, ledger_exists: false }]);
+    } finally {
+      await client.end({ timeout: 5 });
+    }
+  });
+});

@@ -110,6 +110,21 @@ URL is set without a callback path, the path defaults to
 `/auth/email/verify`. Always verify that a generated link lands on the tenant
 application before promoting the configuration.
 
+Hosted deployments can also set a durable environment fallback for shared
+email delivery:
+
+```bash
+EMAIL_BRAND_NAME=Acme
+EMAIL_MAGIC_LINK_BASE_URL=https://app.acme.example
+EMAIL_MAGIC_LINK_CALLBACK_PATH=/auth/callback/email
+```
+
+These values are used when tenant email config is absent or temporarily
+unavailable. A tenant's explicit `brandName` and `magicLinkBaseUrl` still take
+precedence. Keep the email link origin separate from `APP_URL` when `APP_URL`
+must identify the Steward API for OAuth callbacks. The email base must be a
+credential-free HTTP(S) origin, and the callback must be root-relative.
+
 ## Custom raw templates (deployer-supplied branded markup)
 
 For fully branded auth emails, a hosted Steward instance can store raw

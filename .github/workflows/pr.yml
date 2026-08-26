@@ -565,7 +565,10 @@ jobs:
 
     services:
       postgres:
-        image: postgres:16-alpine
+        # Production core-repair catalogs are PostgreSQL-major/minor sensitive.
+        # Keep this required lane on the exact production release used to
+        # generate and rehearse the checked-in manifest.
+        image: postgres:18.4-alpine
         env:
           POSTGRES_USER: steward
           POSTGRES_PASSWORD: steward_ci
@@ -602,6 +605,14 @@ jobs:
         env:
           DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"
 
+      - name: Steward release repair and readiness proof (Postgres 18.4)
+        run: >-
+          bun test
+          ./packages/db/src/__tests__/steward-core-repair.test.ts
+          ./packages/db/src/__tests__/steward-schema-migrations.test.ts
+        env:
+          DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"
+
       - name: Builder perps migration reconciliation proof (real Postgres)
         run: bun test ./packages/db/src/__tests__/agent-policy-builder-perps-reconcile-migration.test.ts
         env:
@@ -612,8 +623,11 @@ jobs:
         env:
           DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"
 
-      - name: Email challenge publication race proof (real Postgres)
-        run: bun test ./packages/auth/src/__tests__/email-postgres-publish.integration.test.ts
+      - name: Auth store race proofs (real Postgres)
+        run: >-
+          bun test
+          ./packages/auth/src/__tests__/email-postgres-publish.integration.test.ts
+          ./packages/auth/src/__tests__/store-backends-postgres-compare-delete.integration.test.ts
         env:
           DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"
 

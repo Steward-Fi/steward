@@ -1,5 +1,5 @@
 # Build and push Docker image to GitHub Container Registry (GHCR)
-# Builds every pull request and publishes pushes to develop/main or version tags (v*).
+# Triggers on pushes to develop + main branches and version tags (v*)
 #   develop -> :develop image (auto-deployed to STAGING by deploy-staging.yml)
 #   main    -> :main image (promoted to PRODUCTION manually via deploy-railway.yml)
 #   v*      -> :<semver> image (tagged release for production)
@@ -11,6 +11,16 @@ on:
     tags: ["v*"]
   pull_request:
     branches: [develop, main]
+    paths:
+      - "Dockerfile"
+      - ".dockerignore"
+      - "package.json"
+      - "bun.lock"
+      - "turbo.json"
+      - "tsconfig.json"
+      - "web/package.json"
+      - "packages/**"
+      - ".github/workflows/docker.yml"
 
 # A branch tag is mutable. Do not let a slower build for an older push finish
 # after a newer build and overwrite `:develop` / `:main` with stale bytes.

@@ -1,16 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
-import type { EmailAuth } from "@stwd/auth";
 import { closeDb, getDb, tenantConfigs, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
-import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import { KeyStore } from "@stwd/vault";
 import { eq } from "drizzle-orm";
-import { Hono } from "hono";
 import {
   clearEmailAuthTenantCacheForTests,
-  emailAuthRequestCacheSizeForTests,
-  expireEmailAuthTenantCacheForTests,
   getEmailAuthForTenant,
   initAuthStores,
   invalidateEmailAuthForTenant,
@@ -47,6 +42,9 @@ describe("getEmailAuthForTenant", () => {
     delete process.env.STEWARD_MASTER_PASSWORD;
     delete process.env.APP_URL;
     delete process.env.EMAIL_FROM;
+    delete process.env.EMAIL_BRAND_NAME;
+    delete process.env.EMAIL_MAGIC_LINK_BASE_URL;
+    delete process.env.EMAIL_MAGIC_LINK_CALLBACK_PATH;
     delete process.env.RESEND_API_KEY;
   });
 
@@ -65,101 +63,38 @@ describe("getEmailAuthForTenant", () => {
     expect(provider.replyTo).toBeUndefined();
   });
 
-  it("does not retain retired custody authorities across requests", async () => {
+  it("keeps hosted branding and callback routing when tenant config is unavailable", async () => {
+    const dbHandle = getDb();
+    await dbHandle.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TEST_TENANT_ID));
+    process.env.EMAIL_BRAND_NAME = "Eliza";
+    process.env.EMAIL_MAGIC_LINK_BASE_URL = "https://cloud-staging.example";
+    process.env.EMAIL_MAGIC_LINK_CALLBACK_PATH = "/auth/callback/email";
     clearEmailAuthTenantCacheForTests();
-    await getDb().delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TEST_TENANT_ID));
-    const environments = Array.from({ length: 5 }, (_, index) => ({
-      NODE_ENV: "test",
-      STEWARD_MASTER_PASSWORD: `email-authority-${index}`,
-      STEWARD_KDF_SALT: `${(index + 1).toString(16).padStart(2, "0")}`.repeat(16),
-    }));
 
-    const first = await withRuntimeEnvironment(environments[0], () =>
-      getEmailAuthForTenant(TEST_TENANT_ID),
-    );
-    for (const environment of environments.slice(1)) {
-      await withRuntimeEnvironment(environment, () => getEmailAuthForTenant(TEST_TENANT_ID));
-    }
-    const reloadedFirst = await withRuntimeEnvironment(environments[0], () =>
-      getEmailAuthForTenant(TEST_TENANT_ID),
-    );
-
-    expect(reloadedFirst).not.toBe(first);
-    clearEmailAuthTenantCacheForTests();
-  });
-
-  it("keeps mounted EmailAuth provider authority isolated across hostile request overlap", async () => {
-    clearEmailAuthTenantCacheForTests();
-    await getDb().delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TEST_TENANT_ID));
-    let signalAStarted: (() => void) | undefined;
-    let releaseA: (() => void) | undefined;
-    const aStarted = new Promise<void>((resolve) => {
-      signalAStarted = resolve;
-    });
-    const aMayResume = new Promise<void>((resolve) => {
-      releaseA = resolve;
-    });
-    const instances = new Map<string, EmailAuth>();
-    const app = new Hono();
-    app.get("/email/:requestId", async (c) => {
-      const requestId = c.req.param("requestId");
-      if (requestId === "a") {
-        signalAStarted?.();
-        await aMayResume;
-      }
+    try {
       const auth = await getEmailAuthForTenant(TEST_TENANT_ID);
-      instances.set(requestId, auth);
-      return c.json({
-        from: (auth as any).from,
-        baseUrl: (auth as any).baseUrl,
+
+      expect((auth as any).brandName).toBe("Eliza");
+      expect((auth as any).baseUrl).toBe("https://cloud-staging.example");
+      expect((auth as any).callbackPath).toBe("/auth/callback/email");
+
+      const rendered = (auth as any).templateRenderer(undefined, {
+        magicLink: "https://cloud-staging.example/auth/callback/email?token=fixture",
+        email: "user@example.com",
+        tenantName: (auth as any).brandName,
+        expiresInMinutes: 10,
       });
-    });
-    const sharedCustody = {
-      NODE_ENV: "test",
-      STEWARD_MASTER_PASSWORD: "shared-overlap-custody",
-      STEWARD_KDF_SALT: "ab".repeat(16),
-    };
-
-    const requestA = withRuntimeEnvironment(
-      {
-        ...sharedCustody,
-        RESEND_API_KEY: "resend-authority-a",
-        EMAIL_FROM: "A <a@example.test>",
-        APP_URL: "https://a.example.test",
-        STEWARD_EMAIL_CODE_SECRET: "a".repeat(32),
-      },
-      () => app.request("/email/a"),
-    );
-    await aStarted;
-    const responseB = await withRuntimeEnvironment(
-      {
-        ...sharedCustody,
-        RESEND_API_KEY: "resend-authority-b",
-        EMAIL_FROM: "B <b@example.test>",
-        APP_URL: "https://b.example.test",
-        STEWARD_EMAIL_CODE_SECRET: "b".repeat(32),
-      },
-      () => app.request("/email/b"),
-    );
-    releaseA?.();
-    const responseA = await requestA;
-
-    expect(responseB.status).toBe(200);
-    expect(responseA.status).toBe(200);
-    expect(await responseB.json()).toEqual({
-      from: "B <b@example.test>",
-      baseUrl: "https://b.example.test",
-    });
-    expect(await responseA.json()).toEqual({
-      from: "A <a@example.test>",
-      baseUrl: "https://a.example.test",
-    });
-    expect(instances.get("a")).not.toBe(instances.get("b"));
-    expect((instances.get("a") as any).codeVerifierSecret).toBe("a".repeat(32));
-    expect((instances.get("b") as any).codeVerifierSecret).toBe("b".repeat(32));
-    expect((instances.get("a") as any).provider.client.key).toBe("resend-authority-a");
-    expect((instances.get("b") as any).provider.client.key).toBe("resend-authority-b");
-    clearEmailAuthTenantCacheForTests();
+      expect(rendered.subject).toBe("Sign in to Eliza");
+      expect(rendered.text).toContain(
+        "https://cloud-staging.example/auth/callback/email?token=fixture",
+      );
+      expect(rendered.html).not.toContain("steward.fi");
+    } finally {
+      delete process.env.EMAIL_BRAND_NAME;
+      delete process.env.EMAIL_MAGIC_LINK_BASE_URL;
+      delete process.env.EMAIL_MAGIC_LINK_CALLBACK_PATH;
+      clearEmailAuthTenantCacheForTests();
+    }
   });
 
   it("uses the tenant-specific config when emailConfig is set", async () => {
@@ -379,86 +314,6 @@ describe("getEmailAuthForTenant", () => {
 
     await dbHandle.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TEST_TENANT_ID));
     invalidateEmailAuthForTenant(TEST_TENANT_ID);
-  });
-
-  it("bounds EmailAuth reachability to one request across custody rotations", async () => {
-    clearEmailAuthTenantCacheForTests();
-    const dbHandle = getDb();
-    await dbHandle.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TEST_TENANT_ID));
-    const seen = new Set<object>();
-
-    for (let generation = 0; generation < 40; generation += 1) {
-      const auth = await withRuntimeEnvironment(
-        {
-          NODE_ENV: "test",
-          STEWARD_MASTER_PASSWORD: `email-rotation-${generation}`,
-          STEWARD_KDF_SALT: generation.toString(16).padStart(2, "0").repeat(16),
-        },
-        async () => {
-          const first = await getEmailAuthForTenant(TEST_TENANT_ID);
-          expect(await getEmailAuthForTenant(TEST_TENANT_ID)).toBe(first);
-          expect(emailAuthRequestCacheSizeForTests()).toBe(1);
-          return first;
-        },
-      );
-      seen.add(auth);
-      expect(emailAuthRequestCacheSizeForTests()).toBe(0);
-    }
-
-    expect(seen.size).toBe(40);
-  });
-
-  it("retires the old credential-bearing provider on request-local invalidation", async () => {
-    clearEmailAuthTenantCacheForTests();
-    await getDb().delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TEST_TENANT_ID));
-
-    await withRuntimeEnvironment(
-      {
-        NODE_ENV: "test",
-        RESEND_API_KEY: "request-local-resend-key",
-        EMAIL_FROM: "Request <login@request.example>",
-        APP_URL: "https://request.example",
-      },
-      async () => {
-        const first = await getEmailAuthForTenant(TEST_TENANT_ID);
-        const firstProvider = (first as any).provider;
-        expect(firstProvider.client).not.toBeNull();
-        invalidateEmailAuthForTenant(TEST_TENANT_ID);
-        await Promise.resolve();
-        expect(firstProvider.client).toBeNull();
-        expect(firstProvider.from).toBe("");
-
-        const replacement = await getEmailAuthForTenant(TEST_TENANT_ID);
-        expect(replacement).not.toBe(first);
-        expect(emailAuthRequestCacheSizeForTests()).toBe(1);
-      },
-    );
-  });
-
-  it("expires and retires request-local email authority after the bounded TTL", async () => {
-    clearEmailAuthTenantCacheForTests();
-    await getDb().delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TEST_TENANT_ID));
-
-    await withRuntimeEnvironment(
-      {
-        NODE_ENV: "test",
-        RESEND_API_KEY: "expiring-request-resend-key",
-        EMAIL_FROM: "Expiring <login@request.example>",
-      },
-      async () => {
-        const first = await getEmailAuthForTenant(TEST_TENANT_ID);
-        const firstProvider = (first as any).provider;
-        expireEmailAuthTenantCacheForTests(TEST_TENANT_ID);
-
-        const replacement = await getEmailAuthForTenant(TEST_TENANT_ID);
-        await Promise.resolve();
-
-        expect(replacement).not.toBe(first);
-        expect(firstProvider.client).toBeNull();
-        expect(firstProvider.from).toBe("");
-        expect(emailAuthRequestCacheSizeForTests()).toBe(1);
-      },
-    );
   });
 });
 

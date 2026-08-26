@@ -663,50 +663,8 @@
     {
       "idx": 114,
       "version": "7",
-      "when": 1787306400000,
-      "tag": "0114_durable_wallet_claim_account_audit",
-      "breakpoints": true
-    },
-    {
-      "idx": 118,
-      "version": "7",
-      "when": 1787306400000,
-      "tag": "0118_generic_intent_execution_delete_fence",
-      "breakpoints": true
-    },
-    {
-      "idx": 119,
-      "version": "7",
-      "when": 1787306401000,
-      "tag": "0119_signed_artifact_retirement",
-      "breakpoints": true
-    },
-    {
-      "idx": 120,
-      "version": "7",
-      "when": 1787306402000,
-      "tag": "0120_monero_pre_relay_lifecycle",
-      "breakpoints": true
-    },
-    {
-      "idx": 121,
-      "version": "7",
-      "when": 1787306403000,
-      "tag": "0121_trade_order_recovery",
-      "breakpoints": true
-    },
-    {
-      "idx": 122,
-      "version": "7",
-      "when": 1787306404000,
-      "tag": "0122_provider_action_audit_outbox_delivery",
-      "breakpoints": true
-    },
-    {
-      "idx": 123,
-      "version": "7",
-      "when": 1787306405000,
-      "tag": "0123_personal_lifecycle_invariants",
+      "when": 1787529855000,
+      "tag": "0114_passkey_rp_provenance",
       "breakpoints": true
     }
   ]

@@ -47,7 +47,15 @@ export {
   withTenantTransactionDatabaseDeadline,
 } from "./client";
 export { runMigrations } from "./migrate";
-export { getMigrationExpectation, type MigrationExpectation } from "./migration-status";
+export {
+  assessMigrationLedger,
+  getMigrationExpectation,
+  getMigrationLedgerExpectation,
+  type MigrationExpectation,
+  type MigrationLedgerEntry,
+  type MigrationLedgerExpectation,
+  type MigrationLedgerReadiness,
+} from "./migration-status";
 export { encryptOAuthAccountPlaintextTokens } from "./oauth-token-encryption";
 export {
   getPluginMigrationLedgerExpectation,

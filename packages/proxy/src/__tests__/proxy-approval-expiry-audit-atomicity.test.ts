@@ -56,6 +56,7 @@ let resetReleaseClaimBarrier: typeof import("../handlers/release")["__resetRelea
 let setForwardProxyRequest: typeof import("../handlers/proxy")["__setForwardProxyRequestForTests"];
 let proxyMod: typeof import("../handlers/proxy");
 
+// ─── Audit-chain-insert fault injection ───────────────────────────────────────
 beforeAll(async () => {
   process.env.STEWARD_PGLITE_MEMORY = "true";
   process.env.STEWARD_MASTER_PASSWORD = MASTER_PASSWORD;

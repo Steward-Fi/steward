@@ -4,11 +4,15 @@ set -euo pipefail
 # =============================================================================
 # Railway Deploy Script
 # Updates Railway service to use a new Docker image via GraphQL API,
-# polls for deployment success, and verifies the /health endpoint.
+# polls the exact deployment id for success, verifies Railway's effective
+# platform healthcheck contract, and (for production) performs an authenticated
+# deep-readiness probe.
 #
 # Usage: ./scripts/railway-deploy.sh <image-tag> [--dry-run]
+#        RAILWAY_IMAGE_DIGEST=sha256:<64-hex> ./scripts/railway-deploy.sh [--dry-run]
 #   e.g. ./scripts/railway-deploy.sh v0.5.0
 #        ./scripts/railway-deploy.sh develop --dry-run
+#        RAILWAY_IMAGE_DIGEST=sha256:<64-hex> ./scripts/railway-deploy.sh
 #
 # Environment variables:
 #   RAILWAY_TOKEN       (required) Railway API bearer token
@@ -16,15 +20,27 @@ set -euo pipefail
 #   RAILWAY_ENV_ID      (REQUIRED) the deployer's own Railway environment id
 #   RAILWAY_IMAGE_REPO  (optional) default: ghcr.io/steward-fi/steward (the
 #                                  canonical published OSS image)
-#   RAILWAY_HEALTH_URL  (required) the deployer's public HTTPS root origin
-#   RAILWAY_DIRECT_HEALTH_URL (optional) a second direct service HTTPS origin
-#   RAILWAY_REQUIRE_DIRECT_HEALTH (optional, default false) require the direct
-#                       origin and accept only after both origins are ready
+#   RAILWAY_IMAGE_DIGEST (optional) immutable sha256 digest. Mutually exclusive
+#                                  with the positional image tag. Production
+#                                  deploys should always use this mode.
+#   RAILWAY_HEALTH_URL  (optional) the deployer's public HTTPS origin (without
+#                                  /health or /ready)
+#   RAILWAY_REQUIRE_HEALTH (optional, default: false) fail before mutation when
+#                                  RAILWAY_HEALTH_URL is absent. Production CI
+#                                  must set this to true.
+#   RAILWAY_REQUIRE_READY (optional, default: false) require an authenticated
+#                                  /ready acceptance probe. Production CI must
+#                                  set this to true.
+#   RAILWAY_READY_PROBE_TOKEN (required when RAILWAY_REQUIRE_READY=true) value
+#                                  configured as STEWARD_READY_PROBE_TOKEN on the
+#                                  target. It is compared in-process with the
+#                                  exact target's control-plane value, sent only
+#                                  in the X-Steward-Probe-Token header, and never
+#                                  logged.
+#   RAILWAY_EXPECTED_REVISION (required when RAILWAY_REQUIRE_READY=true) exact
+#                                  40-character source revision bound to the
+#                                  immutable image provenance.
 #   DEPLOY_TIMEOUT      (optional) max seconds to wait for deploy, default: 300
-#   RAILWAY_HEALTH_TIMEOUT  (optional) max seconds to wait for health, default: 120
-#   RAILWAY_HEALTH_INTERVAL (optional) seconds between health probes, default: 5
-#   RAILWAY_API_CONNECT_TIMEOUT (optional) GraphQL connect bound, default: 5
-#   RAILWAY_API_TIMEOUT (optional) GraphQL request bound, default: 20
 #   RAILWAY_ALLOW_REJECTED_DEPLOY (optional, default: fail closed) when "true",
 #                       a deployment Railway rejected before any container ran
 #                       (no build/deploy logs) degrades to a non-fatal warning
@@ -55,14 +71,11 @@ fail() { echo -e "${RED}[railway]${RESET} $*" >&2; }
 SERVICE_ID="${RAILWAY_SERVICE_ID:-}"
 ENV_ID="${RAILWAY_ENV_ID:-}"
 IMAGE_REPO="${RAILWAY_IMAGE_REPO:-ghcr.io/steward-fi/steward}"
+IMAGE_DIGEST="${RAILWAY_IMAGE_DIGEST:-}"
 HEALTH_URL="${RAILWAY_HEALTH_URL:-}"
-DIRECT_HEALTH_URL="${RAILWAY_DIRECT_HEALTH_URL:-}"
-REQUIRE_DIRECT_HEALTH="${RAILWAY_REQUIRE_DIRECT_HEALTH:-false}"
+READY_PROBE_TOKEN="${RAILWAY_READY_PROBE_TOKEN:-}"
+EXPECTED_REVISION="${RAILWAY_EXPECTED_REVISION:-}"
 TIMEOUT="${DEPLOY_TIMEOUT:-300}"
-HEALTH_TIMEOUT="${RAILWAY_HEALTH_TIMEOUT:-120}"
-HEALTH_INTERVAL="${RAILWAY_HEALTH_INTERVAL:-5}"
-API_CONNECT_TIMEOUT="${RAILWAY_API_CONNECT_TIMEOUT:-5}"
-API_TIMEOUT="${RAILWAY_API_TIMEOUT:-20}"
 API="https://backboard.railway.com/graphql/v2"
 
 DRY_RUN=false
@@ -84,6 +97,7 @@ for arg in "$@"; do
     --dry-run) DRY_RUN=true ;;
     -h|--help)
       echo "Usage: $0 <image-tag> [--dry-run]"
+      echo "       RAILWAY_IMAGE_DIGEST=sha256:<64-hex> $0 [--dry-run]"
       echo "  e.g. $0 v0.5.0"
       exit 0
       ;;
@@ -99,25 +113,26 @@ for arg in "$@"; do
   esac
 done
 
-if [[ -z "$IMAGE_TAG" ]]; then
-  fail "Image tag required. Usage: $0 <image-tag>"
+if [[ -n "$IMAGE_TAG" && -n "$IMAGE_DIGEST" ]]; then
+  fail "Choose exactly one image selector: a positional tag or RAILWAY_IMAGE_DIGEST"
   exit 1
 fi
 
-if [[ ! "$TIMEOUT" =~ ^[1-9][0-9]*$ ||
-      ! "$HEALTH_TIMEOUT" =~ ^[1-9][0-9]*$ ||
-      ! "$HEALTH_INTERVAL" =~ ^[1-9][0-9]*$ ||
-      ! "$API_CONNECT_TIMEOUT" =~ ^[1-9][0-9]*$ ||
-      ! "$API_TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
-  fail "deploy, health, and Railway API timeouts must be positive integers"
+if [[ -z "$IMAGE_TAG" && -z "$IMAGE_DIGEST" ]]; then
+  fail "Image selector required: pass an image tag or set RAILWAY_IMAGE_DIGEST"
   exit 1
 fi
 
 # OCI/Docker tags are at most 128 characters and contain only this conservative
 # subset. Reject whitespace, shell-like syntax, slashes, and control characters
 # before the value reaches logs or a deployment API.
-if [[ ! "$IMAGE_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+if [[ -n "$IMAGE_TAG" && ! "$IMAGE_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
   fail "Invalid image tag: expected an OCI tag (letters, digits, _, ., -; max 128 chars)"
+  exit 1
+fi
+
+if [[ -n "$IMAGE_DIGEST" && ! "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+  fail "Invalid image digest: expected sha256 followed by exactly 64 lowercase hex characters"
   exit 1
 fi
 
@@ -126,95 +141,188 @@ if [[ -z "${RAILWAY_TOKEN:-}" ]]; then
   exit 1
 fi
 
-FULL_IMAGE="${IMAGE_REPO}:${IMAGE_TAG}"
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-
-# Validate the probe authority before the first control-plane request. Never
-# print the untrusted input: it may contain userinfo or query credentials.
-if [[ -z "$HEALTH_URL" ]]; then
-  fail "RAILWAY_HEALTH_URL is required for deployment acceptance"
-  exit 1
-fi
-if ! HEALTH_URL=$(node "$SCRIPT_DIR/validate-public-origin.mjs" --resolve-origin "$HEALTH_URL"); then
-  fail "RAILWAY_HEALTH_URL must be a credential-free public HTTPS root origin"
-  exit 1
-fi
-if [[ "$REQUIRE_DIRECT_HEALTH" != "true" && "$REQUIRE_DIRECT_HEALTH" != "false" ]]; then
-  fail "RAILWAY_REQUIRE_DIRECT_HEALTH must be true or false"
-  exit 1
-fi
-if [[ "$REQUIRE_DIRECT_HEALTH" == "true" && -z "$DIRECT_HEALTH_URL" ]]; then
-  fail "RAILWAY_DIRECT_HEALTH_URL is required for direct deployment acceptance"
-  exit 1
-fi
-if [[ -n "$DIRECT_HEALTH_URL" ]] &&
-   ! DIRECT_HEALTH_URL=$(node "$SCRIPT_DIR/validate-public-origin.mjs" --resolve-origin "$DIRECT_HEALTH_URL"); then
-  fail "RAILWAY_DIRECT_HEALTH_URL must be a credential-free public HTTPS root origin"
-  exit 1
-fi
-if [[ "$REQUIRE_DIRECT_HEALTH" == "true" && "$DIRECT_HEALTH_URL" == "$HEALTH_URL" ]]; then
-  fail "RAILWAY_DIRECT_HEALTH_URL must be distinct from RAILWAY_HEALTH_URL"
+if [[ "${RAILWAY_REQUIRE_HEALTH:-false}" != "true" &&
+      "${RAILWAY_REQUIRE_HEALTH:-false}" != "false" ]]; then
+  fail "RAILWAY_REQUIRE_HEALTH must be true or false"
   exit 1
 fi
 
-# Redact every externally supplied diagnostic before it reaches CI. This covers
-# credential-bearing URLs (Postgres, Redis, brokers, generic HTTP userinfo),
-# sensitive query parameters, structured assignments, bearer tokens, Steward
-# keys, and long cryptographic material.
-redact_secrets() {
-  sed -E \
-    -e 's#([A-Za-z][A-Za-z0-9+.-]*://[^/@[:space:]:]*:)[^@/[:space:]]+@#\1…REDACTED…@#g' \
-    -e 's#([A-Za-z][A-Za-z0-9+.-]*://)[^/:@[:space:]]+@#\1…REDACTED…@#g' \
-    -e 's#([?&](access_key|access_token|api_key|apikey|auth|authorization|client_secret|code|credential|key|password|passwd|pwd|secret|signature|sig|token|x-amz-credential|x-amz-security-token|x-amz-signature)=)[^&#"'"'"'[:space:]]+#\1…REDACTED…#gI' \
-    -e 's/(Bearer )[A-Za-z0-9._~+/-]+/\1…REDACTED…/g' \
-    -e 's/(([A-Za-z_][A-Za-z0-9_]*_(URL|URI|DSN)|URL|URI|DSN)"[[:space:]]*:[[:space:]]*")[^"]*/\1…REDACTED…/gI' \
-    -e 's/(([A-Za-z_][A-Za-z0-9_]*_(URL|URI|DSN)|URL|URI|DSN)[[:space:]]*[:=][[:space:]]*")[^"]*/\1…REDACTED…/gI' \
-    -e "s/(([A-Za-z_][A-Za-z0-9_]*_(URL|URI|DSN)|URL|URI|DSN)[[:space:]]*[:=][[:space:]]*')[^']*/\1…REDACTED…/gI" \
-    -e 's/(([A-Za-z_][A-Za-z0-9_]*_(URL|URI|DSN)|URL|URI|DSN)[[:space:]]*[:=][[:space:]]*)[^[:space:],}]+/\1…REDACTED…/gI' \
-    -e 's/((SECRET|SECRETS|PASSWORD|PASS|SALT|TOKEN|KEY|KEYS|HMAC|PRIVATE)[A-Z_]*"[[:space:]]*:[[:space:]]*")[^"]*/\1…REDACTED…/g' \
-    -e 's/((SECRET|SECRETS|PASSWORD|PASS|SALT|TOKEN|KEY|KEYS|HMAC|PRIVATE)[A-Z_]*[[:space:]]*[:=][[:space:]]*")[^"]*/\1…REDACTED…/g' \
-    -e "s/((SECRET|SECRETS|PASSWORD|PASS|SALT|TOKEN|KEY|KEYS|HMAC|PRIVATE)[A-Z_]*[[:space:]]*[:=][[:space:]]*')[^']*/\1…REDACTED…/g" \
-    -e 's/((SECRET|SECRETS|PASSWORD|PASS|SALT|TOKEN|KEY|KEYS|HMAC|PRIVATE)[A-Z_]*[[:space:]]*[:=][[:space:]]*)[^[:space:],}]+/\1…REDACTED…/g' \
-    -e 's/(^|[^A-Za-z0-9_])stw_[A-Za-z0-9]+/\1stw_…REDACTED…/g' \
-    -e 's/(^|[^0-9a-fA-F])[0-9a-fA-F]{48,}([^0-9a-fA-F]|$)/\1…REDACTED…\2/g'
-}
+if [[ "${RAILWAY_REQUIRE_HEALTH:-false}" == "true" && -z "$HEALTH_URL" ]]; then
+  fail "RAILWAY_HEALTH_URL is required when RAILWAY_REQUIRE_HEALTH=true"
+  exit 1
+fi
 
-redacted_text() {
-  printf '%s' "${1:-}" | redact_secrets
-}
+if [[ "${RAILWAY_REQUIRE_READY:-false}" != "true" &&
+      "${RAILWAY_REQUIRE_READY:-false}" != "false" ]]; then
+  fail "RAILWAY_REQUIRE_READY must be true or false"
+  exit 1
+fi
 
-# Never print a raw GraphQL response: arbitrary provider messages can echo
-# request variables or deployment environment values. Keep only error code and
-# redacted message when the response is valid JSON.
-graphql_diagnostic() {
-  local response="${1:-}"
-  local diagnostic
-  diagnostic=$(printf '%s' "$response" | jq -c \
-    '[.errors[]? | {code: (.extensions.code // "UNKNOWN"), message: (.message // "request failed")}]' \
-    2>/dev/null) || diagnostic=""
-  if [[ -n "$diagnostic" && "$diagnostic" != "[]" ]]; then
-    redacted_text "$diagnostic"
-  else
-    printf '%s' '<no safe GraphQL diagnostic available>'
+if [[ "${RAILWAY_REQUIRE_READY:-false}" == "true" ]]; then
+  if [[ -z "$HEALTH_URL" ]]; then
+    fail "RAILWAY_HEALTH_URL is required when RAILWAY_REQUIRE_READY=true"
+    exit 1
   fi
-}
+  if [[ ! "$HEALTH_URL" =~ ^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?/?$ ]]; then
+    fail "RAILWAY_HEALTH_URL must be an HTTPS origin when authenticated readiness is required"
+    exit 1
+  fi
+  if [[ -z "$READY_PROBE_TOKEN" ]]; then
+    fail "RAILWAY_READY_PROBE_TOKEN is required when RAILWAY_REQUIRE_READY=true"
+    exit 1
+  fi
+  if [[ ! "$EXPECTED_REVISION" =~ ^[0-9a-f]{40}$ ]]; then
+    fail "RAILWAY_EXPECTED_REVISION must be a full lowercase 40-character commit SHA"
+    exit 1
+  fi
+  if [[ -z "$IMAGE_DIGEST" ]]; then
+    fail "RAILWAY_IMAGE_DIGEST is required when RAILWAY_REQUIRE_READY=true"
+    exit 1
+  fi
+fi
+
+if [[ -n "$IMAGE_DIGEST" ]]; then
+  FULL_IMAGE="${IMAGE_REPO}@${IMAGE_DIGEST}"
+else
+  FULL_IMAGE="${IMAGE_REPO}:${IMAGE_TAG}"
+fi
+
+# Railway exposes the deployed image/digest but not OCI revision labels in its
+# Deployment API. For production, prove the immutable digest carries the exact
+# expected source revision before mutating Railway. The post-deploy check below
+# then binds that same digest to the exact Railway deployment id.
+if [[ "${RAILWAY_REQUIRE_READY:-false}" == "true" ]]; then
+  PROVENANCE_TAG="${IMAGE_REPO}:sha-${EXPECTED_REVISION}"
+  PROVENANCE_MANIFEST=$(docker buildx imagetools inspect \
+    "$PROVENANCE_TAG" --format '{{json .Manifest}}' 2>/dev/null) || {
+    fail "Could not inspect the exact-revision image manifest"
+    exit 1
+  }
+  PROVENANCE_DIGEST=$(jq -er \
+    '.digest | select(test("^sha256:[0-9a-f]{64}$"))' \
+    <<<"$PROVENANCE_MANIFEST" 2>/dev/null) || {
+    fail "Exact-revision image tag did not resolve to a valid digest"
+    exit 1
+  }
+  if [[ "$PROVENANCE_DIGEST" != "$IMAGE_DIGEST" ]]; then
+    fail "Exact-revision image tag does not resolve to RAILWAY_IMAGE_DIGEST"
+    exit 1
+  fi
+  IMAGE_PROVENANCE=$(docker buildx imagetools inspect \
+    "$PROVENANCE_TAG" \
+    --format '{{json .Provenance.SLSA.buildDefinition.externalParameters.request.args}}' \
+    2>/dev/null) || {
+    fail "Could not inspect immutable image provenance"
+    exit 1
+  }
+  IMAGE_REVISION=$(jq -er '."label:org.opencontainers.image.revision"' \
+    <<<"$IMAGE_PROVENANCE" 2>/dev/null) || {
+    fail "Immutable image provenance does not contain a source revision"
+    exit 1
+  }
+  if [[ "$IMAGE_REVISION" != "$EXPECTED_REVISION" ]]; then
+    fail "Immutable image provenance revision does not match RAILWAY_EXPECTED_REVISION"
+    exit 1
+  fi
+  # Close the tag-movement window between the manifest and provenance reads.
+  RECHECK_MANIFEST=$(docker buildx imagetools inspect \
+    "$PROVENANCE_TAG" --format '{{json .Manifest}}' 2>/dev/null) || {
+    fail "Could not recheck the exact-revision image manifest"
+    exit 1
+  }
+  RECHECK_DIGEST=$(jq -er \
+    '.digest | select(test("^sha256:[0-9a-f]{64}$"))' \
+    <<<"$RECHECK_MANIFEST" 2>/dev/null) || {
+    fail "Exact-revision image tag recheck did not return a valid digest"
+    exit 1
+  }
+  if [[ "$RECHECK_DIGEST" != "$IMAGE_DIGEST" ]]; then
+    fail "Exact-revision image tag moved during provenance verification"
+    exit 1
+  fi
+  ok "Immutable image provenance matches the expected source revision"
+fi
 
 # ---------------------------------------------------------------------------
 # Helper: GraphQL request
 # ---------------------------------------------------------------------------
 gql() {
   local query="$1"
-  curl -sf --connect-timeout "$API_CONNECT_TIMEOUT" --max-time "$API_TIMEOUT" \
-    -X POST "$API" \
+  curl -sf -X POST "$API" \
     -H "Authorization: Bearer ${RAILWAY_TOKEN}" \
     -H "Content-Type: application/json" \
     -d "$query"
 }
 
 # ---------------------------------------------------------------------------
-# Step 1: Update the service image via serviceInstanceUpdate
+# Step 1: Pin the image and Railway platform healthcheck together
 # ---------------------------------------------------------------------------
 log "Deploying ${FULL_IMAGE} to Railway service ${SERVICE_ID}"
+
+# Prove the protected workflow secret matches the effective
+# STEWARD_READY_PROBE_TOKEN for this exact Railway service/environment before
+# any mutation. Read this through Railway's control plane instead of probing the
+# currently serving /ready: a pinned rollback image may predate authenticated
+# verbose readiness even though the candidate is required to support it. The
+# variables response contains secrets, so never print it or GraphQL errors from
+# this query. The strict post-cutover /ready contract below remains unchanged.
+if [[ "${RAILWAY_REQUIRE_READY:-false}" == "true" ]]; then
+  READY_TARGET_QUERY=$(jq -n \
+    --arg sid "$SERVICE_ID" \
+    --arg eid "$ENV_ID" \
+    '{query: "query ReadyProbeTarget($sid: String!, $eid: String!) { serviceInstance(serviceId: $sid, environmentId: $eid) { serviceId environmentId service { id projectId } } }", variables: {sid: $sid, eid: $eid}}')
+  READY_TARGET_RESULT=$(gql "$READY_TARGET_QUERY" 2>/dev/null) || {
+    fail "Could not verify the Railway readiness-token target before mutation"
+    exit 1
+  }
+  if echo "$READY_TARGET_RESULT" | jq -e '.errors' >/dev/null 2>&1; then
+    fail "Railway rejected the readiness-token target query before mutation"
+    exit 1
+  fi
+  PROJECT_ID=$(echo "$READY_TARGET_RESULT" | jq -er \
+    --arg sid "$SERVICE_ID" \
+    --arg eid "$ENV_ID" \
+    '.data.serviceInstance
+      | select(.serviceId == $sid
+          and .environmentId == $eid
+          and .service.id == $sid
+          and (.service.projectId | type) == "string"
+          and (.service.projectId | length) > 0)
+      | .service.projectId' 2>/dev/null) || PROJECT_ID=""
+  unset READY_TARGET_RESULT
+  if [[ -z "$PROJECT_ID" ]]; then
+    fail "Railway returned an invalid readiness-token target before mutation"
+    exit 1
+  fi
+
+  READY_VARIABLES_QUERY=$(jq -n \
+    --arg pid "$PROJECT_ID" \
+    --arg eid "$ENV_ID" \
+    --arg sid "$SERVICE_ID" \
+    '{query: "query ReadyProbeVariables($pid: String!, $eid: String!, $sid: String!) { variables(projectId: $pid, environmentId: $eid, serviceId: $sid, unrendered: false) }", variables: {pid: $pid, eid: $eid, sid: $sid}}')
+  unset PROJECT_ID
+  READY_VARIABLES_RESULT=$(gql "$READY_VARIABLES_QUERY" 2>/dev/null) || {
+    fail "Could not read the effective Railway readiness-token configuration before mutation"
+    exit 1
+  }
+  if echo "$READY_VARIABLES_RESULT" | jq -e '.errors' >/dev/null 2>&1; then
+    unset READY_VARIABLES_RESULT
+    fail "Railway rejected the readiness-token configuration query before mutation"
+    exit 1
+  fi
+  TARGET_READY_PROBE_TOKEN=$(echo "$READY_VARIABLES_RESULT" | jq -er \
+    '.data.variables.STEWARD_READY_PROBE_TOKEN
+      | select(type == "string" and length > 0)' 2>/dev/null) || TARGET_READY_PROBE_TOKEN=""
+  unset READY_VARIABLES_RESULT
+  if [[ -z "$TARGET_READY_PROBE_TOKEN" || "$TARGET_READY_PROBE_TOKEN" != "$READY_PROBE_TOKEN" ]]; then
+    unset TARGET_READY_PROBE_TOKEN
+    fail "The protected readiness token does not match the effective Railway service variable"
+    fail "No Railway configuration or deployment mutation was attempted."
+    exit 1
+  fi
+  unset TARGET_READY_PROBE_TOKEN
+  ok "Protected readiness token matches the exact Railway service/environment configuration"
+fi
 
 if $DRY_RUN; then
   warn "[DRY RUN] Would update service to image: ${FULL_IMAGE}"
@@ -222,6 +330,58 @@ if $DRY_RUN; then
   ok "Dry run complete"
   exit 0
 fi
+
+# Snapshot the recent deployments before changing service-instance config.
+# Railway does not document serviceInstanceUpdate as returning a deployment id.
+# If that mutation, an auto-deploy setting, or a concurrent actor creates a
+# deployment in addition to the explicit serviceInstanceDeployV2 id below, fail
+# closed rather than guessing which release won the race. Also reject any
+# pre-existing nonterminal deployment that could complete later and displace the
+# candidate while remaining hidden inside the baseline id set.
+BASELINE_QUERY=$(jq -n \
+  --arg sid "$SERVICE_ID" \
+  --arg eid "$ENV_ID" \
+  '{query: "query BaselineDeployments($input: DeploymentListInput!, $inflightInput: DeploymentListInput!) { deployments(input: $input, first: 20) { edges { node { id status } } } inflight: deployments(input: $inflightInput, first: 1) { edges { node { id status } } } }", variables: {input: {serviceId: $sid, environmentId: $eid}, inflightInput: {serviceId: $sid, environmentId: $eid, status: {in: ["BUILDING", "DEPLOYING", "INITIALIZING", "NEEDS_APPROVAL", "QUEUED", "REMOVING", "WAITING"]}}}}')
+BASELINE_RESULT=$(gql "$BASELINE_QUERY" 2>&1) || {
+  fail "Could not capture the pre-mutation Railway deployment inventory"
+  exit 1
+}
+if echo "$BASELINE_RESULT" | jq -e '.errors' >/dev/null 2>&1; then
+  fail "Railway rejected the pre-mutation deployment inventory query"
+  exit 1
+fi
+BASELINE_NODES=$(echo "$BASELINE_RESULT" | jq -ce \
+  '[.data.deployments.edges[]?.node
+    | select((.id | type) == "string" and (.status | type) == "string")]' 2>/dev/null) || {
+  fail "Railway returned an invalid pre-mutation deployment inventory"
+  exit 1
+}
+BASELINE_COUNT=$(echo "$BASELINE_RESULT" | jq -er \
+  '[.data.deployments.edges[]?.node] | length' 2>/dev/null) || BASELINE_COUNT=""
+VALID_BASELINE_COUNT=$(echo "$BASELINE_NODES" | jq -er 'length' 2>/dev/null) || VALID_BASELINE_COUNT=""
+if [[ ! "$BASELINE_COUNT" =~ ^[0-9]+$ || "$VALID_BASELINE_COUNT" != "$BASELINE_COUNT" ]]; then
+  fail "Railway returned an invalid pre-mutation deployment inventory"
+  exit 1
+fi
+NONTERMINAL_BASELINE_COUNT=$(echo "$BASELINE_NODES" | jq -er \
+  '[.[] | select(.status != "SUCCESS"
+    and .status != "FAILED"
+    and .status != "CRASHED"
+    and .status != "REMOVED"
+    and .status != "SLEEPING"
+    and .status != "SKIPPED")]
+    | length' 2>/dev/null) || NONTERMINAL_BASELINE_COUNT=""
+INFLIGHT_BASELINE_COUNT=$(echo "$BASELINE_RESULT" | jq -er \
+  '[.data.inflight.edges[]?.node] | length' 2>/dev/null) || INFLIGHT_BASELINE_COUNT=""
+if [[ ! "$NONTERMINAL_BASELINE_COUNT" =~ ^[0-9]+$ ||
+      ! "$INFLIGHT_BASELINE_COUNT" =~ ^[0-9]+$ ||
+      "$NONTERMINAL_BASELINE_COUNT" != "0" ||
+      "$INFLIGHT_BASELINE_COUNT" != "0" ]]; then
+  fail "A pre-existing nonterminal Railway deployment is already in flight"
+  fail "Wait for it to reach a terminal state before starting an exact-id production deploy."
+  exit 1
+fi
+BASELINE_IDS=$(echo "$BASELINE_NODES" | jq -ce '[.[].id]')
 
 # Set the image source on the SERVICE INSTANCE for THIS environment.
 #
@@ -235,54 +395,85 @@ fi
 #
 # serviceInstanceUpdate(serviceId, environmentId, input.source.image) sets the
 # image on the EXACT environment instance we deploy, which is the documented,
-# current way to deploy a prebuilt Docker image per-environment. We then call
+# current way to deploy a prebuilt Docker image per-environment. Set
+# healthcheckPath in the SAME mutation so Railway itself must get HTTP 200 from
+# this deployment's /health before it can become active; a public-domain probe
+# could otherwise be answered by the previous instance. Pin overlapSeconds=0 so
+# the authenticated public /ready acceptance probe cannot be load-balanced to
+# an old deployment after Railway marks the tracked candidate active. We then
+# call
 # serviceInstanceDeployV2 (which alone triggers a fresh deploy of the new tag;
 # redeploy mutations only re-run the existing tag).
 CONNECT_PAYLOAD=$(jq -n \
   --arg sid "$SERVICE_ID" \
   --arg eid "$ENV_ID" \
   --arg img "$FULL_IMAGE" \
-  '{query: "mutation($sid: String!, $eid: String!, $input: ServiceInstanceUpdateInput!) { serviceInstanceUpdate(serviceId: $sid, environmentId: $eid, input: $input) }", variables: {sid: $sid, eid: $eid, input: {source: {image: $img}}}}')
-
-# Record when this run started so the poll ignores any pre-existing (stale)
-# deployment for this service/env. serviceInstanceUpdate only changes the image
-# SOURCE; it does not create a new deployment, so without this guard the poll
-# reads edges[0] = the previous, already-FAILED deployment and reports a fresh
-# failure ~10s in on every run.
-START_TS=$(date -u +%s)
+  '{query: "mutation($sid: String!, $eid: String!, $input: ServiceInstanceUpdateInput!) { serviceInstanceUpdate(serviceId: $sid, environmentId: $eid, input: $input) }", variables: {sid: $sid, eid: $eid, input: {source: {image: $img}, healthcheckPath: "/health", overlapSeconds: 0}}}')
 
 CONNECT_RESULT=$(gql "$CONNECT_PAYLOAD" 2>&1) || {
   fail "serviceInstanceUpdate mutation failed"
-  fail "Response: $(graphql_diagnostic "$CONNECT_RESULT")"
+  fail "Response: $CONNECT_RESULT"
   exit 1
 }
 
 # Check for GraphQL errors
 if echo "$CONNECT_RESULT" | jq -e '.errors' >/dev/null 2>&1; then
-  fail "GraphQL error: $(graphql_diagnostic "$CONNECT_RESULT")"
+  fail "GraphQL error: $(echo "$CONNECT_RESULT" | jq -r '.errors[0].message')"
   exit 1
 fi
 
-ok "Service instance updated to ${FULL_IMAGE} (env ${ENV_ID})"
+INSTANCE_QUERY=$(jq -n \
+  --arg sid "$SERVICE_ID" \
+  --arg eid "$ENV_ID" \
+  '{query: "query($sid: String!, $eid: String!) { serviceInstance(serviceId: $sid, environmentId: $eid) { serviceId environmentId healthcheckPath overlapSeconds source { image } } }", variables: {sid: $sid, eid: $eid}}')
+INSTANCE_RESULT=$(gql "$INSTANCE_QUERY" 2>&1) || {
+  fail "Could not verify the effective Railway service-instance configuration"
+  exit 1
+}
+if echo "$INSTANCE_RESULT" | jq -e '.errors' >/dev/null 2>&1; then
+  fail "Railway rejected the effective service-instance query"
+  exit 1
+fi
+if ! echo "$INSTANCE_RESULT" | jq -e \
+  --arg sid "$SERVICE_ID" \
+  --arg eid "$ENV_ID" \
+  --arg img "$FULL_IMAGE" \
+  '.data.serviceInstance
+    | .serviceId == $sid
+      and .environmentId == $eid
+      and .healthcheckPath == "/health"
+      and .overlapSeconds == 0
+      and .source.image == $img' >/dev/null 2>&1; then
+  fail "Railway effective config does not match the requested service, environment, image, /health gate, and zero-overlap cutover"
+  exit 1
+fi
+
+ok "Service instance pinned to ${FULL_IMAGE} with Railway healthcheckPath=/health"
 
 # serviceInstanceUpdate only updates the image source; explicitly trigger a
-# deployment so a new deployment is actually created. Treat failure as
-# non-fatal: some Railway configurations auto-deploy on update, in which case
-# the poll below (filtered to deployments newer than START_TS) still picks up
-# the new one.
+# deployment so a new deployment is actually created. The returned id is the
+# only deployment this run may accept. A trigger error or missing id is fatal:
+# guessing from the latest deployment can select a stale or concurrent deploy.
 TRIGGER_DEPLOY_ID=""
 DEPLOY_PAYLOAD=$(jq -n \
   --arg sid "$SERVICE_ID" \
   --arg eid "$ENV_ID" \
   '{query: "mutation($sid: String!, $eid: String!) { serviceInstanceDeployV2(serviceId: $sid, environmentId: $eid) }", variables: {sid: $sid, eid: $eid}}')
 
-DEPLOY_TRIGGER=$(gql "$DEPLOY_PAYLOAD" 2>&1) || DEPLOY_TRIGGER=""
+DEPLOY_TRIGGER=$(gql "$DEPLOY_PAYLOAD" 2>&1) || {
+  fail "serviceInstanceDeployV2 mutation failed"
+  exit 1
+}
 if echo "$DEPLOY_TRIGGER" | jq -e '.errors' >/dev/null 2>&1; then
-  warn "serviceInstanceDeploy returned an error (service may auto-deploy on connect): $(graphql_diagnostic "$DEPLOY_TRIGGER")"
-else
-  TRIGGER_DEPLOY_ID=$(echo "$DEPLOY_TRIGGER" | jq -r '.data.serviceInstanceDeployV2 // ""' 2>/dev/null) || TRIGGER_DEPLOY_ID=""
-  [[ -n "$TRIGGER_DEPLOY_ID" ]] && ok "Triggered deployment ${TRIGGER_DEPLOY_ID}"
+  fail "serviceInstanceDeployV2 returned a GraphQL error"
+  exit 1
 fi
+TRIGGER_DEPLOY_ID=$(echo "$DEPLOY_TRIGGER" | jq -r '.data.serviceInstanceDeployV2 // ""' 2>/dev/null) || TRIGGER_DEPLOY_ID=""
+if [[ ! "$TRIGGER_DEPLOY_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+  fail "serviceInstanceDeployV2 did not return a valid deployment id"
+  exit 1
+fi
+ok "Triggered exact deployment ${TRIGGER_DEPLOY_ID}"
 
 # ---------------------------------------------------------------------------
 # Step 2: Poll for deployment status
@@ -290,9 +481,30 @@ fi
 log "Waiting for deployment to complete (timeout: ${TIMEOUT}s)..."
 
 POLL_QUERY=$(jq -n \
+  --arg id "$TRIGGER_DEPLOY_ID" \
   --arg sid "$SERVICE_ID" \
   --arg eid "$ENV_ID" \
-  '{query: "query($input: DeploymentListInput!) { deployments(input: $input, first: 5) { edges { node { id status createdAt } } } }", variables: {input: {serviceId: $sid, environmentId: $eid}}}')
+  '{query: "query TrackedDeployment($id: String!, $input: DeploymentListInput!) { deployment(id: $id) { id serviceId environmentId status createdAt meta } deployments(input: $input, first: 20) { edges { node { id } } } }", variables: {id: $id, input: {serviceId: $sid, environmentId: $eid}}}')
+
+assert_no_untracked_deployment() {
+  local result="$1"
+  local untracked_count
+  untracked_count=$(echo "$result" | jq -er \
+    --argjson baseline "$BASELINE_IDS" \
+    --arg tracked "$TRIGGER_DEPLOY_ID" \
+    '[.data.deployments.edges[]?.node.id as $candidate
+      | select(($baseline | index($candidate)) == null and $candidate != $tracked)]
+      | length' 2>/dev/null) || untracked_count=""
+  if [[ ! "$untracked_count" =~ ^[0-9]+$ ]]; then
+    fail "Railway returned an invalid deployment inventory while polling"
+    exit 1
+  fi
+  if [[ "$untracked_count" != "0" ]]; then
+    fail "Detected an untracked deployment created after this run started"
+    fail "Refusing acceptance because an auto-deploy or concurrent mutation raced the exact deployment id."
+    exit 1
+  fi
+}
 
 ELAPSED=0
 INTERVAL=10
@@ -305,11 +517,10 @@ DEPLOY_ID=""
 # missing required env var on the Railway service) or an image-pull error — the
 # logs below are what tell the operator which. Uses a non-failing curl (the
 # normal gql() helper uses `curl -sf`, which drops the body on any HTTP error)
-# and reports only whitelisted/redacted diagnostics; raw GraphQL responses may
-# contain echoed variables or provider secrets and are never printed.
+# and prints RAW responses so a wrong field name / auth-scope problem is still
+# visible rather than silently swallowed.
 gql_raw() {
-  curl -s --connect-timeout "$API_CONNECT_TIMEOUT" --max-time "$API_TIMEOUT" \
-    -X POST "$API" \
+  curl -s -X POST "$API" \
     -H "Authorization: Bearer ${RAILWAY_TOKEN}" \
     -H "Content-Type: application/json" \
     -d "$1" 2>/dev/null
@@ -321,6 +532,18 @@ gql_raw() {
 # app/code regression). 0 when the container actually produced output (a real
 # crash/health failure that SHOULD fail the pipeline).
 LOGS_EMPTY=0
+
+# Redact obvious secret shapes before printing build/deploy logs to CI
+# stderr: a crash-looped container may have echoed config (DATABASE_URL,
+# STEWARD_* secrets, Bearer tokens) to its logs (SEC-129).
+redact_secrets() {
+  sed -E \
+    -e 's#(postgres(ql)?://[^:/@]+:)[^@]+@#\1…REDACTED…@#g' \
+    -e 's/(Bearer )[A-Za-z0-9._~+/-]+/\1…REDACTED…/g' \
+    -e 's/((SECRET|SECRETS|PASSWORD|PASS|SALT|TOKEN|KEY|KEYS|HMAC|PRIVATE)[A-Z_]*=)[^[:space:]]+/\1…REDACTED…/g' \
+    -e 's/(^|[^A-Za-z0-9_])stw_[A-Za-z0-9]+/\1stw_…REDACTED…/g' \
+    -e 's/(^|[^0-9a-fA-F])[0-9a-fA-F]{48,}([^0-9a-fA-F]|$)/\1…REDACTED…\2/g'
+}
 
 dump_failure() {
   LOGS_EMPTY=0
@@ -340,10 +563,7 @@ dump_failure() {
   q=$(jq -n --arg id "$DEPLOY_ID" \
     '{query: "query($id: String!) { deployment(id: $id) { id status createdAt staticUrl url canRedeploy } }", variables: {id: $id}}')
   resp=$(gql_raw "$q")
-  local deployment_summary
-  deployment_summary=$(printf '%s' "${resp:-}" | jq -c \
-    '.data.deployment | {id, status, createdAt, canRedeploy}' 2>/dev/null) || deployment_summary=""
-  fail "deployment: ${deployment_summary:-$(graphql_diagnostic "$resp")}"
+  fail "deployment: ${resp:-<empty response>}"
 
   q=$(jq -n --arg id "$DEPLOY_ID" \
     '{query: "query($id: String!) { buildLogs(deploymentId: $id, limit: 200) { message } }", variables: {id: $id}}')
@@ -353,7 +573,7 @@ dump_failure() {
   if [[ -n "$build_logs" ]]; then
     echo "$build_logs" | redact_secrets >&2
   else
-    fail "$(graphql_diagnostic "$resp")"
+    fail "${resp:-<empty response>}"
   fi
 
   q=$(jq -n --arg id "$DEPLOY_ID" \
@@ -364,7 +584,7 @@ dump_failure() {
   if [[ -n "$deploy_logs" ]]; then
     echo "$deploy_logs" | redact_secrets >&2
   else
-    fail "$(graphql_diagnostic "$resp")"
+    fail "${resp:-<empty response>}"
   fi
   fail "----------------------------------------"
 
@@ -404,29 +624,40 @@ while [[ $ELAPSED -lt $TIMEOUT ]]; do
   ELAPSED=$((ELAPSED + INTERVAL))
 
   POLL_RESULT=$(gql "$POLL_QUERY" 2>/dev/null) || continue
+  assert_no_untracked_deployment "$POLL_RESULT"
 
-  # Select the deployment to track: prefer the one serviceInstanceDeploy
-  # returned; otherwise the newest deployment CREATED AT/AFTER this run started
-  # (epoch). This avoids reading a stale, previously-failed deployment.
-  if [[ -n "$TRIGGER_DEPLOY_ID" ]]; then
-    NODE=$(echo "$POLL_RESULT" | jq -c --arg id "$TRIGGER_DEPLOY_ID" \
-      '.data.deployments.edges[]?.node | select(.id == $id)' 2>/dev/null) || NODE=""
-  else
-    NODE=$(echo "$POLL_RESULT" | jq -c --argjson since "$START_TS" \
-      '[.data.deployments.edges[]?.node | select((.createdAt | sub("\\.[0-9]+Z$";"Z") | fromdateiso8601) >= $since)] | sort_by(.createdAt) | last // empty' 2>/dev/null) || NODE=""
-  fi
+  NODE=$(echo "$POLL_RESULT" | jq -c '.data.deployment // empty' 2>/dev/null) || NODE=""
 
   if [[ -z "$NODE" || "$NODE" == "null" ]]; then
-    log "  Waiting for a new deployment to appear (${ELAPSED}s elapsed)"
+    log "  Waiting for exact deployment ${TRIGGER_DEPLOY_ID} to appear (${ELAPSED}s elapsed)"
     continue
   fi
 
   DEPLOY_ID=$(echo "$NODE" | jq -r '.id // ""' 2>/dev/null) || DEPLOY_ID=""
   DEPLOY_STATUS=$(echo "$NODE" | jq -r '.status // "UNKNOWN"' 2>/dev/null) || DEPLOY_STATUS="UNKNOWN"
 
+  if ! echo "$NODE" | jq -e \
+    --arg id "$TRIGGER_DEPLOY_ID" \
+    --arg sid "$SERVICE_ID" \
+    --arg eid "$ENV_ID" \
+    '.id == $id and .serviceId == $sid and .environmentId == $eid' >/dev/null 2>&1; then
+    fail "Railway returned a deployment outside the requested id/service/environment scope"
+    exit 1
+  fi
+
   case "$DEPLOY_STATUS" in
     SUCCESS)
-      ok "Deployment succeeded after ${ELAPSED}s (id: ${DEPLOY_ID})"
+      if ! echo "$NODE" | jq -e \
+        --arg img "$FULL_IMAGE" \
+        --arg digest "$IMAGE_DIGEST" \
+        '.meta.image == $img
+          and .meta.serviceManifest.deploy.healthcheckPath == "/health"
+          and .meta.serviceManifest.deploy.overlapSeconds == 0
+          and ($digest == "" or .meta.imageDigest == $digest)' >/dev/null 2>&1; then
+        fail "Successful deployment metadata does not match the requested image/digest and /health platform gate"
+        exit 1
+      fi
+      ok "Exact deployment passed Railway platform health and image identity gates after ${ELAPSED}s (id: ${DEPLOY_ID})"
       break
       ;;
     FAILED|CRASHED|REMOVED)
@@ -450,63 +681,123 @@ if [[ "$DEPLOY_STATUS" != "SUCCESS" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Step 3: Health check
+# Step 3: Post-cutover readiness
 # ---------------------------------------------------------------------------
-# A Railway SUCCESS state only proves control-plane rollout. Deployment
-# acceptance requires an explicit public probe authority plus both liveness and
-# durable readiness receipts; absent authority must never look shipped.
-verify_public_probe() {
-  local path="$1"
-  local label="$2"
-  local origin="${3:-$HEALTH_URL}"
-  local probe_result="000 "
-  local http_code="000"
-  local remote_ip=""
-  local attempt=0
-  local started=$SECONDS
-  local elapsed=0
+# Railway's SUCCESS state above is accepted only for the exact deployment id,
+# image/digest, embedded platform healthcheckPath=/health, and zero overlap. A
+# public /health request is not used as production proof because an old instance
+# could answer it during a transition. Production additionally requires deep
+# readiness with the operator probe token and proves the response was
+# authenticated by checking a verbose-only field that the public response
+# deliberately omits.
+if [[ -z "$HEALTH_URL" ]]; then
+  ok "Exact Railway deployment accepted. Skipping public probe (RAILWAY_HEALTH_URL not set)."
+  exit 0
+fi
 
-  log "Verifying ${label} endpoint: ${origin}${path}"
-  while [[ $elapsed -lt $HEALTH_TIMEOUT ]]; do
-    attempt=$((attempt + 1))
-    local remaining=$((HEALTH_TIMEOUT - elapsed))
-    local request_timeout=$((remaining < 10 ? remaining : 10))
-    local connect_timeout=$((request_timeout < 5 ? request_timeout : 5))
-    probe_result=$(curl -sS \
-      --connect-timeout "$connect_timeout" \
-      --max-time "$request_timeout" \
-      -o /dev/null \
-      -w "%{http_code} %{remote_ip}" \
-      "${origin}${path}" 2>/dev/null) || probe_result="000 "
-    read -r http_code remote_ip <<< "$probe_result"
-    if [[ "$http_code" == "200" ]] &&
-       node "$SCRIPT_DIR/validate-public-origin.mjs" --ip "$remote_ip" >/dev/null 2>&1; then
-      ok "${label} check passed"
-      return 0
+BASE_URL="${HEALTH_URL%/}"
+
+# Give the service a moment to start accepting traffic
+sleep 5
+
+if [[ "${RAILWAY_REQUIRE_READY:-false}" == "true" ]]; then
+  log "Verifying authenticated deep readiness at ${BASE_URL}/ready"
+  READY_OK=false
+  for i in 1 2 3; do
+    READY_BODY=$(curl --fail --silent --show-error --max-time 20 \
+      -H "X-Steward-Probe-Token: ${READY_PROBE_TOKEN}" \
+      "${BASE_URL}/ready" 2>/dev/null) || READY_BODY=""
+    if [[ -n "$READY_BODY" ]] && echo "$READY_BODY" | jq -e \
+      '.status == "ready"
+        and .checks.migrations.ok == true
+        and .checks.migrations.detail.mode == "steward-owned"
+        and .checks.migrations.detail.expectedSchema == "steward"
+        and .checks.coreRepair.ok == true
+        and .checks.coreRepair.detail.schema == "steward"
+        and .checks.authSchema.ok == true
+        and .checks.authSchema.detail.schema == "steward"' >/dev/null 2>&1; then
+      READY_OK=true
+      break
     fi
-    elapsed=$((SECONDS - started))
-    warn "  ${label} check attempt ${attempt}: HTTP ${http_code} (${elapsed}s elapsed)"
-    remaining=$((HEALTH_TIMEOUT - elapsed))
-    if [[ $remaining -gt 0 ]]; then
-      sleep "$((remaining < HEALTH_INTERVAL ? remaining : HEALTH_INTERVAL))"
+    warn "  Authenticated readiness attempt $i did not return a verified ready response"
+    sleep 5
+  done
+  unset READY_BODY
+
+  if $READY_OK; then
+    ok "Authenticated deep readiness passed"
+  else
+    fail "Authenticated /ready failed after 3 attempts"
+    fail "The response body was withheld because it may contain operator diagnostics."
+    exit 1
+  fi
+else
+  log "Verifying public health endpoint: ${BASE_URL}/health"
+  HEALTH_OK=false
+  for i in 1 2 3; do
+    HTTP_CODE=$(curl -sf -o /dev/null -w "%{http_code}" "${BASE_URL}/health" 2>/dev/null) || HTTP_CODE="000"
+    if [[ "$HTTP_CODE" == "200" ]]; then
+      HEALTH_OK=true
+      break
     fi
-    elapsed=$((SECONDS - started))
+    warn "  Health check attempt $i: HTTP ${HTTP_CODE}"
+    sleep 5
   done
 
-  fail "${label} check failed after ${attempt} attempts / ${HEALTH_TIMEOUT}s (last HTTP: ${http_code})"
-  fail "Collecting Railway logs for deployment ${DEPLOY_ID} before failing."
-  dump_failure
-  return 1
-}
+  if $HEALTH_OK; then
+    ok "Public health check passed (supplemental; Railway exact-deployment health is authoritative)"
+  else
+    fail "Health check failed after 3 attempts (last HTTP: ${HTTP_CODE})"
+    fail "Service may still be starting. Check ${BASE_URL}/health manually."
+    exit 1
+  fi
+fi
 
-verify_public_probe "/health" "Health" || exit 1
-# Liveness alone is insufficient: /ready verifies the migrated ledger, RLS
-# deployment role, Redis/auth stores, and other durable dependencies before a
-# Railway deployment is accepted.
-verify_public_probe "/ready" "Readiness" || exit 1
-if [[ -n "$DIRECT_HEALTH_URL" ]]; then
-  verify_public_probe "/health" "Direct health" "$DIRECT_HEALTH_URL" || exit 1
-  verify_public_probe "/ready" "Direct readiness" "$DIRECT_HEALTH_URL" || exit 1
+# Recheck control-plane identity after the public readiness probe. This closes
+# the interval in which a delayed auto-deploy or concurrent actor could appear
+# after the tracked deployment first reached SUCCESS.
+FINAL_RESULT=$(gql "$POLL_QUERY" 2>/dev/null) || {
+  fail "Could not perform the final exact-deployment control-plane check"
+  exit 1
+}
+assert_no_untracked_deployment "$FINAL_RESULT"
+if ! echo "$FINAL_RESULT" | jq -e \
+  --arg id "$TRIGGER_DEPLOY_ID" \
+  --arg sid "$SERVICE_ID" \
+  --arg eid "$ENV_ID" \
+  --arg img "$FULL_IMAGE" \
+  --arg digest "$IMAGE_DIGEST" \
+  '.data.deployment
+    | .id == $id
+      and .serviceId == $sid
+      and .environmentId == $eid
+      and .status == "SUCCESS"
+      and .meta.image == $img
+      and .meta.serviceManifest.deploy.healthcheckPath == "/health"
+      and .meta.serviceManifest.deploy.overlapSeconds == 0
+      and ($digest == "" or .meta.imageDigest == $digest)' >/dev/null 2>&1; then
+  fail "Final Railway control-plane state no longer matches the accepted exact deployment"
+  exit 1
+fi
+
+FINAL_ACTIVE_QUERY=$(jq -n \
+  --arg sid "$SERVICE_ID" \
+  --arg eid "$ENV_ID" \
+  '{query: "query FinalActiveDeployment($sid: String!, $eid: String!) { serviceInstance(serviceId: $sid, environmentId: $eid) { latestDeployment { id status } activeDeployments { id status } } }", variables: {sid: $sid, eid: $eid}}')
+FINAL_ACTIVE_RESULT=$(gql "$FINAL_ACTIVE_QUERY" 2>/dev/null) || {
+  fail "Could not verify the final active Railway deployment"
+  exit 1
+}
+if ! echo "$FINAL_ACTIVE_RESULT" | jq -e \
+  --arg id "$TRIGGER_DEPLOY_ID" \
+  '.data.serviceInstance
+    | .latestDeployment.id == $id
+      and .latestDeployment.status == "SUCCESS"
+      and (.activeDeployments | length) == 1
+      and .activeDeployments[0].id == $id
+      and .activeDeployments[0].status == "SUCCESS"' >/dev/null 2>&1; then
+  fail "The exact tracked deployment is not Railway's sole final active deployment"
+  exit 1
 fi
 
 # ---------------------------------------------------------------------------
@@ -517,9 +808,11 @@ ok "=========================================="
 ok "  Railway Deploy Complete"
 ok "  Image:   ${FULL_IMAGE}"
 ok "  Service: ${SERVICE_ID}"
-ok "  Health:  ${HEALTH_URL}/health ✓"
-ok "  Ready:   ${HEALTH_URL}/ready ✓"
-if [[ -n "$DIRECT_HEALTH_URL" ]]; then
-  ok "  Direct:  ${DIRECT_HEALTH_URL}/ready ✓"
+ok "  Deploy:  ${DEPLOY_ID}"
+ok "  Platform healthcheckPath: /health ✓"
+if [[ "${RAILWAY_REQUIRE_READY:-false}" == "true" ]]; then
+  ok "  Authenticated readiness: ${BASE_URL}/ready ✓"
+else
+  ok "  Supplemental health: ${BASE_URL}/health ✓"
 fi
 ok "=========================================="

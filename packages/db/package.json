@@ -6,12 +6,19 @@
   "main": "src/index.ts",
   "exports": {
     ".": "./src/index.ts",
-    "./pglite": "./src/pglite-entry.ts"
+    "./pglite": "./src/pglite-entry.ts",
+    "./steward-core-repair": "./src/steward-core-repair.ts",
+    "./steward-release-readiness": "./src/steward-release-readiness.ts",
+    "./steward-schema-migrations": "./src/steward-schema-migrations.ts"
   },
   "scripts": {
     "build": "tsc --noEmit",
     "dev": "tsc --watch",
     "migrate": "bun src/migrate.ts",
+    "migrate:steward-core-repair": "bun src/steward-core-repair.ts",
+    "check:steward-core-repair-old-image": "bun scripts/check-steward-core-repair-old-image.ts",
+    "generate:steward-core-repair-catalog": "bun scripts/generate-steward-core-repair-catalog.ts",
+    "migrate:steward-schema": "bun src/steward-schema-migrations.ts",
     "migrate:neon": "drizzle-kit migrate",
     "generate": "drizzle-kit generate",
     "test": "bun test --timeout 30000"

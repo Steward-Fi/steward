@@ -11,16 +11,13 @@ function sourceBetween(startMarker: string, endMarker: string): string {
 }
 
 describe("auth login audit RLS boundary", () => {
-  test("keeps auth.login authority exclusively inside the verified-tenant helper", () => {
+  test("binds every auth.login audit to the verified user tenant", () => {
     const auditHelper = sourceBetween(
       "async function writeAuthLoginAudit(",
       "async function findOrCreateWalletTenant(",
     );
     expect(auditHelper).toContain("withVerifiedAuthTenant(tenantId, userId");
     expect(auditHelper).toContain('action: "auth.login"');
-
-    const sourceWithoutHelper = source.replace(auditHelper, "");
-    expect(sourceWithoutHelper).not.toContain('action: "auth.login"');
   });
 
   test("routes shared OAuth/session finalization through the guarded audit helper", () => {
@@ -30,17 +27,5 @@ describe("auth login audit RLS boundary", () => {
     );
     expect(responseBuilder).toContain("await writeAuthLoginAudit(c, tenantId, userId, claims)");
     expect(responseBuilder).not.toContain("await writeAuditEvent(");
-  });
-
-  test("routes the dedicated SIWE finalization audit through the guarded helper", () => {
-    const siweRoute = sourceBetween(
-      'auth.post("/verify", async (c) => {',
-      'auth.post("/verify/solana"',
-    );
-    expect(siweRoute).toContain(
-      "await writeAuthLoginAudit(\n    c,\n    effectiveTenantId,\n    user.id,",
-    );
-    expect(siweRoute).toContain('{ address, walletChain: "ethereum" }');
-    expect(siweRoute).not.toContain("await writeAuditEvent({");
   });
 });

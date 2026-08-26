@@ -8,9 +8,12 @@ setDefaultTimeout(120_000);
 const ENABLED_TENANT_ID = "passkey-enumeration-enabled";
 const DISABLED_TENANT_ID = "passkey-enumeration-disabled";
 const KNOWN_EMAIL = "passkey-known@example.test";
-const NO_PASSKEY_EMAIL = "passkey-without-credential@example.test";
+const NO_PASSKEY_EMAIL = "passkey-none@example.test";
+const OTHER_EMAIL = "passkey-other@example.test";
 const UNKNOWN_EMAIL = "passkey-unknown@example.test";
-const SECRET_CREDENTIAL_ID = "credential-id-must-never-leave-options-route";
+const KNOWN_CREDENTIAL_ID = "credential-id-for-known-email";
+const SECOND_KNOWN_CREDENTIAL_ID = "second-credential-id-for-known-email";
+const OTHER_CREDENTIAL_ID = "credential-id-for-other-email";
 
 type LoginOptions = {
   challenge: string;
@@ -18,7 +21,7 @@ type LoginOptions = {
   rpId: string;
   timeout: number;
   userVerification: string;
-  allowCredentials: Array<{ id: string }>;
+  allowCredentials: Array<{ id: string; transports?: string[] }>;
   [key: string]: unknown;
 };
 
@@ -51,23 +54,46 @@ describe("passkey login options privacy", () => {
         tenantId: DISABLED_TENANT_ID,
         authAbuseConfig: { loginMethods: { passkey: false } },
       });
-    const [knownUser] = await getDb()
+    const [knownUser, otherUser] = await getDb()
       .insert(users)
-      .values({ email: KNOWN_EMAIL, emailVerified: true })
+      .values([
+        { email: KNOWN_EMAIL, emailVerified: true },
+        { email: OTHER_EMAIL, emailVerified: true },
+        { email: NO_PASSKEY_EMAIL, emailVerified: true },
+      ])
       .returning({ id: users.id });
-    await getDb().insert(users).values({ email: NO_PASSKEY_EMAIL, emailVerified: true });
     knownUserId = knownUser.id;
     await getDb()
       .insert(authenticators)
-      .values({
-        userId: knownUserId,
-        credentialId: SECRET_CREDENTIAL_ID,
-        credentialPublicKey: "credential-public-key-must-also-remain-private",
-        counter: 7,
-        credentialDeviceType: "singleDevice",
-        credentialBackedUp: false,
-        transports: ["internal"],
-      });
+      .values([
+        {
+          userId: knownUserId,
+          credentialId: KNOWN_CREDENTIAL_ID,
+          credentialPublicKey: "known-credential-public-key",
+          counter: 7,
+          credentialDeviceType: "singleDevice",
+          credentialBackedUp: false,
+          transports: ["internal"],
+        },
+        {
+          userId: knownUserId,
+          credentialId: SECOND_KNOWN_CREDENTIAL_ID,
+          credentialPublicKey: "second-known-credential-public-key",
+          counter: 0,
+          credentialDeviceType: "multiDevice",
+          credentialBackedUp: true,
+          transports: ["hybrid"],
+        },
+        {
+          userId: otherUser.id,
+          credentialId: OTHER_CREDENTIAL_ID,
+          credentialPublicKey: "other-credential-public-key",
+          counter: 2,
+          credentialDeviceType: "singleDevice",
+          credentialBackedUp: false,
+          transports: ["internal"],
+        },
+      ]);
 
     const auth = await import("../routes/auth");
     getAuthChallengeStore = auth.getAuthChallengeStore;
@@ -102,7 +128,7 @@ describe("passkey login options privacy", () => {
     expect(options.allowCredentials).toEqual([]);
   }
 
-  it("returns the same non-enumerating shape for passkey, no-passkey, and unknown emails", async () => {
+  it("returns the same non-enumerating shape for known, no-passkey, and unknown emails", async () => {
     const [knownResponse, noPasskeyResponse, unknownResponse] = await Promise.all([
       requestOptions(`  ${KNOWN_EMAIL.toUpperCase()}  `),
       requestOptions(NO_PASSKEY_EMAIL),
@@ -123,8 +149,11 @@ describe("passkey login options privacy", () => {
 
     for (const payload of [known, noPasskey, unknown]) {
       const serialized = JSON.stringify(payload);
-      expect(serialized).not.toContain(SECRET_CREDENTIAL_ID);
-      expect(serialized).not.toContain("credential-public-key-must-also-remain-private");
+      expect(serialized).not.toContain(KNOWN_CREDENTIAL_ID);
+      expect(serialized).not.toContain(SECOND_KNOWN_CREDENTIAL_ID);
+      expect(serialized).not.toContain(OTHER_CREDENTIAL_ID);
+      expect(serialized).not.toContain("known-credential-public-key");
+      expect(serialized).not.toContain("other-credential-public-key");
       expect(serialized).not.toContain(knownUserId);
     }
 

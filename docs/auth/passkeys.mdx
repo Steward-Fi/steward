@@ -9,16 +9,16 @@ Passkeys use the [WebAuthn](https://webauthn.guide/) standard for phishing-resis
 
 ## How It Works
 
-Steward's passkey flow is smart: it tries login first, and if the user doesn't have a passkey registered, automatically falls back to registration.
+Steward keeps passkey login and registration explicit. Login always starts a
+privacy-preserving discoverable-credential ceremony; it never uses account
+existence or an HTTP 404 to decide whether to register.
 
 ```
-1. User enters email
-2. SDK calls POST /auth/passkey/login/options
-3. If user exists → browser prompts for passkey → verify → JWT
-4. If user is new (404) → browser prompts to create passkey → register → JWT
+Existing user: signInWithPasskey(email) → browser assertion → JWT
+New user: sendEmailOtp(email) → verifyEmailOtp(email, code)
+          → addPasskey(email, { emailGrant }) → browser attestation → JWT
+Signed-in user: addPasskey(email) → bearer-authenticated attestation → refreshed JWT
 ```
-
-The entire flow is a single SDK call.
 
 ## SDK Usage
 
@@ -30,7 +30,7 @@ const auth = new StewardAuth({
   storage: localStorage,
 });
 
-// One call handles both registration and login
+// Sign in with an existing passkey.
 const result = await auth.signInWithPasskey("user@example.com");
 
 console.log(result);
@@ -73,6 +73,19 @@ function LoginPage() {
 }
 ```
 
+To create a first passkey while signed out, prove email ownership with the OTP
+flow and pass its short-lived, single-use grant to registration:
+
+```typescript
+await auth.sendEmailOtp("new@example.com");
+const { emailGrant } = await auth.verifyEmailOtp("new@example.com", "123456");
+const result = await auth.addPasskey("new@example.com", { emailGrant });
+```
+
+After magic-link or OAuth authentication, call `addPasskey(email)` without a
+grant. The SDK authenticates both registration requests with the stored bearer
+session.
+
 ## Peer Dependency
 
 The SDK dynamically imports `@simplewebauthn/browser` for the WebAuthn ceremony. Install it as a peer dependency:
@@ -113,9 +126,11 @@ PASSKEY_RP_NAME="My App"
 | `/auth/mfa/passkey/options` | POST | Get session-bound passkey MFA options for the signed-in user |
 | `/auth/mfa/passkey/complete` | POST | Complete passkey MFA step-up and receive a refreshed recent-MFA session |
 
-Login and registration endpoints accept `{ email, tenantId? }` in the request body.
-MFA endpoints require the current bearer session; the options response includes
-`challengeId`, and completion sends `{ challengeId, response }`.
+Login endpoints accept `{ email, tenantId? }`. Registration accepts
+`{ email, tenantId?, emailGrant? }`; without a verified-email grant, both
+registration endpoints require the current bearer session. MFA endpoints also
+require the current bearer session; the options response includes `challengeId`,
+and completion sends `{ challengeId, response }`.
 
 ## Browser Support
 

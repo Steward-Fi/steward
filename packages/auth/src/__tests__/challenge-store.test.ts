@@ -9,6 +9,7 @@ function failingBackend(): StoreBackend {
     setIfNotExists: async () => true,
     get: async () => null,
     consume: async () => null,
+    compareDelete: async () => false,
     transition: async () => false,
     publish: async () => false,
     delete: async () => {

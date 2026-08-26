@@ -1,0 +1,68 @@
+{
+  "proofVersion": 3,
+  "databaseClass": "isolated-production-restore",
+  "productionDatabaseTouched": false,
+  "targetSchema": "steward",
+  "repairVersion": "prod-core-0082-0110-v1",
+  "catalogManifestSha256": "c607422b63c7951563ff79468a562b0fc4f0e26ca6ada12e198b77def836d81d",
+  "oldImage": {
+    "image": "ghcr.io/steward-fi/steward@sha256:51557626b6c3215d432c7f4077b1cf44a059051d5a763384335a88270b371ca1",
+    "sourceCommit": "a7b1b4d5232a234e0e3e86e600f58ef9ce8f68ad",
+    "automaticMigrationsDisabled": true
+  },
+  "candidateImage": {
+    "image": "pending",
+    "sourceCommit": "pending",
+    "automaticMigrationsDisabled": true
+  },
+  "preRepair": {
+    "health": "pending",
+    "ready": "pending",
+    "providerDiscovery": "pending",
+    "emailSession": "pending",
+    "passkeySession": "pending",
+    "sessionRefresh": "pending",
+    "chatWrite": "pending"
+  },
+  "postRepair": {
+    "health": "pending",
+    "ready": "pending",
+    "providerDiscovery": "pending",
+    "emailSession": "pending",
+    "passkeySession": "pending",
+    "sessionRefresh": "pending",
+    "chatWrite": "pending"
+  },
+  "candidatePostRepair": {
+    "health": "pending",
+    "ready": "pending",
+    "providerDiscovery": "pending",
+    "emailSession": "pending",
+    "passkeySession": "pending",
+    "sessionRefresh": "pending",
+    "chatWrite": "pending"
+  },
+  "rollbackPostCandidate": {
+    "health": "pending",
+    "ready": "pending",
+    "providerDiscovery": "pending",
+    "emailSession": "pending",
+    "passkeySession": "pending",
+    "sessionRefresh": "pending",
+    "chatWrite": "pending"
+  },
+  "providerExecution": {
+    "drainedBeforeRepair": false,
+    "drainMaintainedThroughFinalRollback": false,
+    "legacyResume": "pending",
+    "candidateEvidenceResumeAndExecution": "pending",
+    "rollbackMode": "pending"
+  },
+  "independentReview": {
+    "reviewedBy": "",
+    "disposition": "pending",
+    "candidateSourceCommit": "pending",
+    "evidenceArtifactSha256": "pending"
+  },
+  "evidenceArtifactSha256": "pending"
+}

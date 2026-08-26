@@ -5,6 +5,7 @@ import {
   closeDb,
   getDb,
   pendingProxyRequests,
+  sql,
   tenants,
   users,
   userTenants,
@@ -21,8 +22,8 @@ import type { AppVariables } from "../services/context";
 // event in SEPARATE transactions, so a crash or audit failure between them
 // could leave an approved/denied/expired row with NO audit record.
 //
-// This suite drives the real route stack against a PGLite database whose
-// transaction layer is instrumented to throw at the audit INSERT. It proves:
+// This suite drives the real route stack against a PGLite database with a
+// database trigger that rejects the required audit INSERT. It proves:
 //   1. both-or-neither: when the required audit write faults, the state
 //      transition is rolled back too (I14);
 //   2. retry-after-crash is idempotent: a second attempt with the fault cleared
@@ -51,77 +52,36 @@ let previousJwtSecret: string | undefined;
 let previousAuditHmacKey: string | undefined;
 let previousMasterPassword: string | undefined;
 
-// ─── Audit-insert fault injection ────────────────────────────────────────────
-//
-// When `faultAuditInsert` is true, the FIRST audit-event INSERT executed inside
-// any transaction throws. We render each executed SQL via the drizzle dialect
-// and match `insert into audit_events`. This simulates the exact crash point:
-// the state row was just updated in the same transaction, and the required
-// audit append fails.
-
-let faultAuditInsert = false;
-
-/** Minimal structural view of a drizzle transaction handle for the fault hook. */
-type TxLike = {
-  execute: (query: unknown) => Promise<unknown>;
-  transaction?: (cb: (tx: TxLike) => Promise<unknown>, ...rest: unknown[]) => Promise<unknown>;
-};
-
-function isAuditInsert(dialect: unknown, query: unknown): boolean {
+async function withApprovalAuditFailure<T>(operation: () => Promise<T>): Promise<T> {
+  await getDb().execute(
+    sql.raw(`
+      CREATE OR REPLACE FUNCTION fail_proxy_approval_audit_for_test()
+      RETURNS trigger AS $$
+      BEGIN
+        IF NEW.action IN ('proxy.approval.approved', 'proxy.approval.denied') THEN
+          RAISE EXCEPTION 'injected approval audit fault';
+        END IF;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql
+    `),
+  );
+  await getDb().execute(
+    sql.raw(`
+      CREATE TRIGGER proxy_approval_audit_failure_for_test
+      BEFORE INSERT ON audit_events
+      FOR EACH ROW EXECUTE FUNCTION fail_proxy_approval_audit_for_test()
+    `),
+  );
   try {
-    const built = (dialect as { sqlToQuery: (q: unknown) => { sql?: string } }).sqlToQuery(query);
-    const text = String(built?.sql ?? "").toLowerCase();
-    return text.includes("insert into audit_events");
-  } catch {
-    return false;
-  }
-}
-
-function installFaultInjectingDb(db: unknown): unknown {
-  // Test-only structural view of the drizzle db so we can wrap `.transaction`.
-  const anyDb = db as {
-    dialect: unknown;
-    transaction: (cb: (tx: TxLike) => Promise<unknown>, ...rest: unknown[]) => Promise<unknown>;
-  };
-  const dialect = anyDb.dialect;
-  const originalTransaction = anyDb.transaction.bind(anyDb);
-
-  const instrumentTransaction = (tx: TxLike) => {
-    const originalExecute = tx.execute.bind(tx);
-    tx.execute = async (query: unknown) => {
-      if (faultAuditInsert && isAuditInsert(dialect, query)) {
-        faultAuditInsert = false; // fault the first audit insert only
-        throw new Error("injected audit fault");
-      }
-      return originalExecute(query);
-    };
-
-    // Tenant auth owns the outer transaction and audited mutations run in a
-    // nested savepoint. Instrument child transactions too so this proof keeps
-    // targeting the real audit INSERT regardless of transaction depth.
-    if (tx.transaction) {
-      const originalNestedTransaction = tx.transaction.bind(tx);
-      tx.transaction = (cb: (nestedTx: TxLike) => Promise<unknown>, ...rest: unknown[]) =>
-        originalNestedTransaction(
-          async (nestedTx: TxLike) => {
-            instrumentTransaction(nestedTx);
-            return cb(nestedTx);
-          },
-          ...rest,
-        );
-    }
-  };
-
-  anyDb.transaction = (cb: (tx: TxLike) => Promise<unknown>, ...rest: unknown[]) => {
-    return originalTransaction(
-      async (tx: TxLike) => {
-        instrumentTransaction(tx);
-        return cb(tx);
-      },
-      ...rest,
+    return await operation();
+  } finally {
+    await getDb().execute(
+      sql.raw("DROP TRIGGER IF EXISTS proxy_approval_audit_failure_for_test ON audit_events"),
+      // ─── Audit-insert fault injection ────────────────────────────────────────────
     );
-  };
-  return db;
+    await getDb().execute(sql.raw("DROP FUNCTION IF EXISTS fail_proxy_approval_audit_for_test()"));
+  }
 }
 
 async function ownerSession(extra?: Record<string, unknown>) {
@@ -190,7 +150,6 @@ beforeAll(async () => {
   process.env.STEWARD_PGLITE_MEMORY = "true";
 
   const { db, client } = await createPGLiteDb("memory://");
-  installFaultInjectingDb(db);
   setPGLiteOverride(db, async () => {
     await client.close();
   });
@@ -224,7 +183,6 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
-  faultAuditInsert = false;
   await getDb().delete(pendingProxyRequests).where(eq(pendingProxyRequests.tenantId, TENANT_ID));
 });
 
@@ -261,8 +219,7 @@ describe("proxy approval/audit atomicity (fault injection)", () => {
   it("approve: audit failure rolls back the state transition (both-or-neither)", async () => {
     const id = await seedPendingProxyRequest("pending");
 
-    faultAuditInsert = true;
-    const res = await approve(id);
+    const res = await withApprovalAuditFailure(() => approve(id));
     // The injected fault surfaces as a 500 (uncaught) — the point is the DB state.
     expect(res.status).toBeGreaterThanOrEqual(500);
 
@@ -278,8 +235,7 @@ describe("proxy approval/audit atomicity (fault injection)", () => {
   it("approve: retry after the fault clears applies the transition exactly once", async () => {
     const id = await seedPendingProxyRequest("pending");
 
-    faultAuditInsert = true;
-    await approve(id); // faults + rolls back
+    await withApprovalAuditFailure(() => approve(id)); // faults + rolls back
     expect((await fetchProxyRequest(id)).status).toBe("pending");
 
     // Retry with fault cleared: succeeds, one transition, one audit.
@@ -298,8 +254,7 @@ describe("proxy approval/audit atomicity (fault injection)", () => {
   it("deny: audit failure rolls back the state transition (both-or-neither)", async () => {
     const id = await seedPendingProxyRequest("pending");
 
-    faultAuditInsert = true;
-    const res = await deny(id);
+    const res = await withApprovalAuditFailure(() => deny(id));
     expect(res.status).toBeGreaterThanOrEqual(500);
 
     const row = await fetchProxyRequest(id);
@@ -310,8 +265,7 @@ describe("proxy approval/audit atomicity (fault injection)", () => {
   it("deny: retry after the fault clears applies the transition exactly once", async () => {
     const id = await seedPendingProxyRequest("pending");
 
-    faultAuditInsert = true;
-    await deny(id);
+    await withApprovalAuditFailure(() => deny(id));
     expect((await fetchProxyRequest(id)).status).toBe("pending");
 
     const res = await deny(id);

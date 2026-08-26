@@ -134,6 +134,7 @@ import {
   getEmailAuthForTenant,
   getImportSessionBackend,
   getPhoneAuth,
+  releaseUnattemptedSmsVerifyClaim,
 } from "./auth";
 
 // ─── Session payload types ────────────────────────────────────────────────────
@@ -3262,7 +3263,11 @@ for (const channel of ["sms", "whatsapp"] as const) {
     const userId = c.get("userId");
     let expiresAt: Date;
     try {
-      ({ expiresAt } = await getPhoneAuth().sendOtp(body.phone, phoneLinkPurpose(channel, userId)));
+      ({ expiresAt } = await getPhoneAuth().sendOtp(
+        body.phone,
+        phoneLinkPurpose(channel, userId),
+        channel,
+      ));
     } catch (err) {
       if (err instanceof Error && err.message === "SMS provider not configured") {
         return c.json<ApiResponse>(
@@ -3309,7 +3314,8 @@ for (const channel of ["sms", "whatsapp"] as const) {
 
     const userId = c.get("userId");
     const linkPurpose = phoneLinkPurpose(channel, userId);
-    if (!(await claimSmsVerifyAttempt(body.phone, linkPurpose))) {
+    const attemptClaim = await claimSmsVerifyAttempt(body.phone, linkPurpose);
+    if (!attemptClaim) {
       return c.json<ApiResponse>(
         {
           ok: false,
@@ -3319,7 +3325,13 @@ for (const channel of ["sms", "whatsapp"] as const) {
       );
     }
 
-    const verified = await getPhoneAuth().verifyOtp(body.phone, body.code, linkPurpose);
+    let verified: Awaited<ReturnType<ReturnType<typeof getPhoneAuth>["verifyOtp"]>>;
+    try {
+      verified = await getPhoneAuth().verifyOtp(body.phone, body.code, linkPurpose);
+    } catch (error) {
+      await releaseUnattemptedSmsVerifyClaim(attemptClaim, error);
+      throw error;
+    }
     if (!verified.valid) {
       return c.json<ApiResponse>({ ok: false, error: "Invalid or expired code" }, 401);
     }

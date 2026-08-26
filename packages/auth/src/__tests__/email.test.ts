@@ -37,6 +37,12 @@ class CapturingBackend implements StoreBackend {
     return value;
   }
 
+  async compareDelete(key: string, expected: string): Promise<boolean> {
+    if ((await this.get(key)) !== expected) return false;
+    this.values.delete(key);
+    return true;
+  }
+
   async transition(
     key: string,
     expected: string,

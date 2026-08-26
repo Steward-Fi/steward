@@ -31,7 +31,6 @@ import {
   toPolicyRule,
   transactions,
   users,
-  withIndependentDatabase,
   withTenantRlsTransaction,
   withTenantTransactionDatabase,
 } from "@stwd/db";
@@ -68,12 +67,26 @@ import { getConfiguredVault } from "./vault-factory";
 export { API_VERSION } from "./version";
 export const DEFAULT_TENANT_ID = "default";
 
-// Global request-rate defaults. The mounted limiter resolves the same overrides
-// from each immutable Worker request snapshot. These literals must never
-// capture process.env at module initialization because a later Worker binding
-// generation that omits an override must return to the documented defaults.
-export const RATE_LIMIT_WINDOW_MS = 60_000;
-export const RATE_LIMIT_MAX_REQUESTS = 100;
+/**
+ * Read a positive-integer env override, falling back to a safe default when the
+ * variable is unset or malformed. Used for operator-tunable limits so a bad
+ * value can never silently disable a guard — it just reverts to the default.
+ */
+function positiveIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed <= 0) return fallback;
+  return parsed;
+}
+
+// Global in-memory request rate limit (Bun entry only). Operator-tunable via env
+// so load tests and local e2e suites — which hammer a single socket IP far harder
+// than any real client — can raise the ceiling without changing the production
+// default (100 requests / 60s per client IP). A missing or invalid override
+// falls back to that default, so this can never weaken the guard unintentionally.
+export const RATE_LIMIT_WINDOW_MS = positiveIntEnv("STEWARD_RATE_LIMIT_WINDOW_MS", 60_000);
+export const RATE_LIMIT_MAX_REQUESTS = positiveIntEnv("STEWARD_RATE_LIMIT_MAX_REQUESTS", 100);
 export const isWorkersRuntime =
   process.env.STEWARD_RUNTIME === "workers" ||
   (typeof navigator !== "undefined" && navigator.userAgent === "Cloudflare-Workers");
@@ -185,31 +198,12 @@ export async function verifySessionToken(token: string) {
       mfaMethod?: string;
       jti?: string;
       exp?: number;
-      iat?: number;
     };
     if (payload.typ === "identity") return null;
     // Never accept a refresh JWT as an access token (SEC-055).
     if (payload.tokenType === "refresh") return null;
     await assertTokenNotRevoked(payload);
     if (payload.userId) {
-      const [revocationSubject] = rowsFromDbResult<{
-        tokens_revoked_before: number | string | null;
-      }>(
-        await getDb().execute(sql`
-          SELECT steward_bootstrap.user_token_revocation_subject(
-            ${payload.userId}::uuid
-          ) AS tokens_revoked_before
-        `),
-      );
-      const tokensRevokedBefore = Number(revocationSubject?.tokens_revoked_before);
-      if (
-        revocationSubject?.tokens_revoked_before === null ||
-        !Number.isSafeInteger(tokensRevokedBefore) ||
-        typeof payload.iat !== "number" ||
-        payload.iat <= tokensRevokedBefore
-      ) {
-        return null;
-      }
       const [user] = payload.tenantId
         ? rowsFromDbResult<{
             deactivated_at: Date | string | null;
@@ -249,6 +243,22 @@ export async function verifySessionToken(token: string) {
     return null;
   }
 }
+
+// ─── SIWE nonce store ─────────────────────────────────────────────────────────
+
+export const nonceStore = new Map<string, { nonce: string; expiresAt: number }>();
+
+export const nonceCleanupTimer = isWorkersRuntime
+  ? undefined
+  : setInterval(
+      () => {
+        const now = Date.now();
+        for (const [key, entry] of nonceStore.entries()) {
+          if (entry.expiresAt <= now) nonceStore.delete(key);
+        }
+      },
+      5 * 60 * 1000,
+    );
 
 // ─── Input validation helpers ─────────────────────────────────────────────────
 
@@ -308,6 +318,7 @@ const isPGLiteRuntime =
 
 export const DATABASE_URL =
   process.env.DATABASE_URL?.trim() || (isPGLiteRuntime ? "" : requireEnv("DATABASE_URL"));
+export const MASTER_PASSWORD = requireEnv("STEWARD_MASTER_PASSWORD");
 
 if (process.env.DATABASE_URL) {
   process.env.DATABASE_URL = DATABASE_URL;
@@ -340,63 +351,39 @@ export const db: DbHandle = new Proxy({} as DbHandle, {
   },
 });
 
-// `vault` is a late-bound Proxy resolving the Vault for the current immutable
-// custody authority. Worker requests therefore cannot retain or borrow another
-// request's password/KDF/provider tuple; Bun resolves the same tuple from env.
+// `vault` is a late-bound Proxy resolving the Vault for the CURRENT master
+// password, memoized per password. In production STEWARD_MASTER_PASSWORD is
+// fixed before this module loads, so exactly one Vault is ever built and every
+// access returns it — behaviorally identical to `const vault = new Vault(...)`.
+//
+// In the single-process api test suite, individual files set their own
+// STEWARD_MASTER_PASSWORD in beforeAll, and a few construct their OWN Vault with
+// that password to seal keys directly into their per-file PGLite db. A captured
+// singleton would have frozen the first (preload) password, so the route-level
+// vault could not decrypt keys those files sealed under a different password —
+// surfacing as AES-GCM "Unsupported state or unable to authenticate data". A
+// per-password memo keeps the route vault in lockstep with whatever password
+// sealed each key. MASTER_PASSWORD (captured at import) is the fallback when the
+// env var is transiently unset (e.g. another file's afterAll deleted it).
 function activeVault(): Vault {
-  return getConfiguredVault();
+  return getConfiguredVault({ fallbackPassword: MASTER_PASSWORD });
 }
-// Test method replacements must follow the active database boundary rather
-// than a custody instance. Custody instances are deliberately request-local,
-// so forwarding an assignment to one freshly-created Vault would make the
-// next request see another instance (and unexpectedly reach a live provider).
-// A WeakMap keeps these explicit test replacements isolated between PGLite/
-// Postgres harnesses without caching any authority or Vault in production.
-const vaultMethodOverrides = new WeakMap<object, Map<PropertyKey, unknown>>();
-const vaultInstanceOverrides = new WeakMap<object, Vault>();
-
-/**
- * Bind a complete Vault replacement to the active test database for one
- * callback. This is intentionally explicit and scoped: production request
- * resolution never populates this map, and the replacement is always removed
- * even when the callback fails.
- */
-export async function _withVaultOverrideForTests<T>(
-  replacement: Vault,
-  callback: () => T | Promise<T>,
-): Promise<T> {
-  const database = getDb() as object;
-  vaultInstanceOverrides.set(database, replacement);
-  try {
-    return await callback();
-  } finally {
-    vaultInstanceOverrides.delete(database);
-  }
-}
-
 export const vault: Vault = new Proxy({} as Vault, {
   get(_target, property) {
-    const overrides = vaultMethodOverrides.get(getDb() as object);
-    if (overrides?.has(property)) return overrides.get(property);
-    const active = (vaultInstanceOverrides.get(getDb() as object) ??
-      activeVault()) as unknown as Record<PropertyKey, unknown>;
+    const active = activeVault() as unknown as Record<PropertyKey, unknown>;
     const value = active[property];
     return typeof value === "function"
       ? (value as (...args: unknown[]) => unknown).bind(active)
       : value;
   },
-  // Production never mutates the vault. Tests monkeypatch methods through this
-  // trap; keying replacements to their database handle makes the override
-  // request-safe and prevents one suite from lending provider authority to
-  // another suite.
+  // Forward assignments to the live instance. Production never mutates the
+  // vault; this exists so tests that monkeypatch a method (e.g.
+  // `context.vault.getBalance = mock`) and restore it in a `finally` land on
+  // the same per-password instance the get trap resolves — without a set trap
+  // the assignment would silently write to the empty Proxy target and the get
+  // trap would keep returning the real method.
   set(_target, property, value) {
-    const database = getDb() as object;
-    let overrides = vaultMethodOverrides.get(database);
-    if (!overrides) {
-      overrides = new Map();
-      vaultMethodOverrides.set(database, overrides);
-    }
-    overrides.set(property, value);
+    (activeVault() as unknown as Record<PropertyKey, unknown>)[property] = value;
     return true;
   },
 });
@@ -418,32 +405,9 @@ export const tenantConfigs = new Map<string, TenantConfig>([
   [defaultTenantConfig.id, defaultTenantConfig],
 ]);
 
-let defaultTenantDb: ReturnType<typeof getDb> | null = null;
-let defaultTenantReady: Promise<void> | null = null;
-
-/** Run tenant bootstrap only after the entry point has completed migrations. */
-export function ensureDefaultTenantReady(): Promise<void> {
-  const activeDb = getDb();
-  if (activeDb !== defaultTenantDb) {
-    defaultTenantDb = activeDb;
-    defaultTenantReady = null;
-  }
-  if (!defaultTenantReady) {
-    const pending = activeDb
-      .execute(sql`
-        SELECT steward_bootstrap.ensure_default_tenant(${process.env.STEWARD_DEFAULT_TENANT_KEY || ""})
-      `)
-      .then(() => undefined)
-      .catch((error) => {
-        if (defaultTenantDb === activeDb && defaultTenantReady === pending) {
-          defaultTenantReady = null;
-        }
-        throw error;
-      });
-    defaultTenantReady = pending;
-  }
-  return defaultTenantReady;
-}
+export const defaultTenantReady = db.execute(sql`
+  SELECT steward_bootstrap.ensure_default_tenant(${process.env.STEWARD_DEFAULT_TENANT_KEY || ""})
+`);
 
 // ─── App variable types ───────────────────────────────────────────────────────
 
@@ -468,11 +432,13 @@ export type { AppVariables };
 // ─── Shared query helpers ─────────────────────────────────────────────────────
 
 export function getTenantPayload(tenant: Tenant): Omit<Tenant, "apiKeyHash"> & TenantConfig {
+  const config = tenantConfigs.get(tenant.id);
   const { apiKeyHash: _apiKeyHash, ...safeTenant } = tenant;
   return {
     ...safeTenant,
-    id: tenant.id,
-    name: tenant.name,
+    name: config?.name || tenant.name,
+    webhookUrl: config?.webhookUrl,
+    defaultPolicies: config?.defaultPolicies,
   };
 }
 
@@ -560,25 +526,10 @@ export async function ensureAgentForTenant(
 }
 
 export async function getPolicySet(tenantId: string, agentId: string): Promise<PolicyRule[]> {
-  const storedPolicies = await db
-    .select({
-      id: policies.id,
-      agentId: policies.agentId,
-      type: policies.type,
-      enabled: policies.enabled,
-      config: policies.config,
-      createdAt: policies.createdAt,
-      updatedAt: policies.updatedAt,
-    })
-    .from(policies)
-    .innerJoin(agents, eq(policies.agentId, agents.id))
-    .where(and(eq(agents.tenantId, tenantId), eq(policies.agentId, agentId)));
+  const storedPolicies = await db.select().from(policies).where(eq(policies.agentId, agentId));
 
   if (storedPolicies.length > 0) return storedPolicies.map(toPolicyRule);
-  // Tenant-level defaults were process-local and could diverge across replicas
-  // or vanish on restart. Policy authority is now exclusively durable,
-  // agent-scoped rows; a missing assignment is an explicit empty policy set.
-  return [];
+  return tenantConfigs.get(tenantId)?.defaultPolicies || [];
 }
 
 export async function getScopedPolicySet(
@@ -592,24 +543,9 @@ export async function getScopedPolicySet(
   if (uniquePolicyIds.length === 0) return [];
 
   const storedPolicies = await db
-    .select({
-      id: policies.id,
-      agentId: policies.agentId,
-      type: policies.type,
-      enabled: policies.enabled,
-      config: policies.config,
-      createdAt: policies.createdAt,
-      updatedAt: policies.updatedAt,
-    })
+    .select()
     .from(policies)
-    .innerJoin(agents, eq(policies.agentId, agents.id))
-    .where(
-      and(
-        eq(agents.tenantId, tenantId),
-        eq(policies.agentId, agentId),
-        inArray(policies.id, uniquePolicyIds),
-      ),
-    );
+    .where(and(eq(policies.agentId, agentId), inArray(policies.id, uniquePolicyIds)));
 
   return storedPolicies.map(toPolicyRule);
 }
@@ -735,7 +671,7 @@ export async function getTransactionStats(agentId: string, chainId?: number) {
   // Spend caps for native value are denominated in a single chain's base unit
   // (wei for EVM, lamports/SPL base units for Solana). The `value` column holds
   // raw per-chain base units, so summing across chains and re-pricing the total
-  // at one chain's native price corrupts the cap. When a chainId is
+  // at one chain's native price corrupts the cap (issue #110). When a chainId is
   // supplied, scope the spend aggregates to that chain so the counters stay in a
   // single consistent unit. When omitted, the fragment is empty and the result
   // is byte-for-byte the prior cross-chain sum (used by display-only callers).
@@ -764,25 +700,14 @@ export async function getTransactionStats(agentId: string, chainId?: number) {
         coalesce(
           sum(
             case
-              when ${transactions.createdAt} >= ${oneDayAgoStr}::timestamptz${chainFilter}
-                and not (
-                  coalesce(${transactions.actionPayload}->>'type', '') = 'transfer'
-                  and coalesce(${transactions.actionPayload}->>'token', 'native') <> 'native'
-                )
-              then (${transactions.value})::numeric
+              when ${transactions.createdAt} >= ${oneDayAgoStr}::timestamptz${chainFilter} then (${transactions.value})::numeric
               else 0
             end
           ),
           0
         )::text
       `,
-      spentThisWeek: sql<string>`coalesce(sum((${transactions.value})::numeric) filter (
-        where true${chainFilter}
-          and not (
-            coalesce(${transactions.actionPayload}->>'type', '') = 'transfer'
-            and coalesce(${transactions.actionPayload}->>'token', 'native') <> 'native'
-          )
-      ), 0)::text`,
+      spentThisWeek: sql<string>`coalesce(sum((${transactions.value})::numeric) filter (where true${chainFilter}), 0)::text`,
       additionalUsdSpentTodayMicros: sql<string>`
         coalesce((
           select sum((${operatorTransferReservations.amountBaseUnits})::numeric)
@@ -809,7 +734,7 @@ export async function getTransactionStats(agentId: string, chainId?: number) {
         gte(transactions.createdAt, oneWeekAgo),
         // An ambiguous broadcast may already have spent funds. Count it until
         // receipt reconciliation proves the final chain outcome.
-        sql`${transactions.status} in ('approved', 'signed', 'broadcast', 'confirmed', 'outcome_unknown')`,
+        sql`${transactions.status} in ('signed', 'broadcast', 'confirmed', 'outcome_unknown')`,
       ),
     );
 
@@ -836,44 +761,13 @@ export async function withAuthenticatedTenantDatabase<T>(
   if (hasTenantTransactionDatabase({ tenantId, userId, ...characteristics })) return callback();
   const context = tenantContextFromAuthenticatedPrincipal({ tenantId, method, subject, userId });
   const driver = isPGLiteRuntime ? "pglite" : getDatabaseDriver();
-  const afterCommitTasks: Array<() => void | Promise<void>> = [];
-  const result = await withTenantRlsTransaction(
+  return withTenantRlsTransaction(
     getDb() as never,
     driver,
     context,
     async (tx) =>
-      withTenantTransactionDatabase(
-        tx as never,
-        { tenantId, userId },
-        callback,
-        characteristics,
-        afterCommitTasks,
-      ),
+      withTenantTransactionDatabase(tx as never, { tenantId, userId }, callback, characteristics),
     characteristics,
-  );
-  for (const task of afterCommitTasks) await task();
-  return result;
-}
-
-/**
- * Commit an autonomous tenant-RLS unit while tenantAuth's request transaction
- * remains open. Security-sensitive pre-I/O checkpoints use this boundary so a
- * later request rollback cannot erase a non-replayable execution fence or
- * evidence after an external side effect.
- */
-export async function withIndependentAuthenticatedTenantDatabase<T>(
-  tenantId: string,
-  method: string,
-  subject: string,
-  callback: () => Promise<T>,
-  userId?: string,
-): Promise<T> {
-  const context = tenantContextFromAuthenticatedPrincipal({ tenantId, method, subject, userId });
-  const driver = isPGLiteRuntime ? "pglite" : getDatabaseDriver();
-  return withIndependentDatabase((independentDb) =>
-    withTenantRlsTransaction(independentDb as never, driver, context, async (tx) =>
-      withTenantTransactionDatabase(tx as never, { tenantId, userId }, callback),
-    ),
   );
 }
 
@@ -892,7 +786,7 @@ export async function tenantAuth(
   next: Next,
   options?: { requireTenantMatch?: string; bindTenantDatabase?: boolean },
 ) {
-  await ensureDefaultTenantReady();
+  await defaultTenantReady;
 
   const authHeader = c.req.header("Authorization");
   if (authHeader?.startsWith("Bearer ")) {
