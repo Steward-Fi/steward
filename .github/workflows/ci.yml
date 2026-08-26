@@ -183,7 +183,7 @@ jobs:
             # that can exceed Bun's 5s default on hosted runners under load.
             # Keep file isolation while allowing the suite's existing work to
             # complete instead of reporting a spurious hook timeout.
-            bun test --isolate --timeout 30000 packages/vault
+            bun test --isolate --parallel 1 --timeout 30000 packages/vault
           else
             bun test --isolate ${{ matrix.package }}
           fi
