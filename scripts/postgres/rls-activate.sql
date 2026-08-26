@@ -408,6 +408,7 @@ BEGIN
     ), expected AS (
       SELECT acl FROM (VALUES
         ('schema:public:USAGE:false'),
+        ('schema:drizzle:USAGE:false'),
         ('schema:steward_bootstrap:USAGE:false'),
         ('schema:steward_rls:USAGE:false'),
         ('function:steward_is_authoritative_wallet_identity(text,text,text,text):EXECUTE:false'),
@@ -417,6 +418,16 @@ BEGIN
         ('function:steward_lock_personal_lifecycle(uuid,text,boolean):EXECUTE:false'),
         ('function:steward_reserved_tenant_kind(text):EXECUTE:false')
       ) fixed(acl)
+      UNION ALL
+      SELECT 'relation:drizzle.' || migration.relname || ':SELECT:false'
+      FROM pg_class migration
+      JOIN pg_namespace namespace ON namespace.oid = migration.relnamespace
+      WHERE namespace.nspname = 'drizzle'
+        AND migration.relkind IN ('r', 'p')
+        AND (
+          migration.relname = '__drizzle_migrations'
+          OR migration.relname LIKE '__drizzle_migrations_plugin\_%' ESCAPE '\'
+        )
       UNION ALL
       SELECT 'relation:public.' || relation.relation_name || ':' || privilege || ':false'
       FROM steward_expected_public_relations relation

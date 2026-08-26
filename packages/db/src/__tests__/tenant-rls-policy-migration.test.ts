@@ -157,6 +157,8 @@ describe("0111 tenant RLS policy installation", () => {
     expect(inventory).toContain("rls-policy-manifest.sql");
     expect(inventory).toContain("pg_get_expr");
     expect(activate).toContain("\\ir rls-policy-inventory.sql");
+    expect(activate).toContain("'schema:drizzle:USAGE:false'");
+    expect(activate).toContain("__drizzle_migrations_plugin\\_%");
     expect(rollback).toContain("\\ir rls-policy-inventory.sql");
     expect(activate).toContain("ENABLE ROW LEVEL SECURITY");
     expect(activate).toContain("FORCE ROW LEVEL SECURITY");
