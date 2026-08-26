@@ -1180,7 +1180,8 @@ async function assertBundledPluginLedgerIntegrity(db: MigrationQueryExecutor): P
     const malformedEffect = effectMatches.find((effect) => !effect.definition_matches);
     if (malformedEffect) {
       throw new Error(
-        `[migrate] Bundled plugin ${plugin.id} contains a malformed checked-in object (${malformedEffect.identity})`,
+        `[migrate] Bundled plugin ${plugin.id} objects exist without their checked-in migration ledger ` +
+          `(malformed checked-in object: ${malformedEffect.identity})`,
       );
     }
     const actualEffects = new Set(effectMatches.map((row) => row.identity));
