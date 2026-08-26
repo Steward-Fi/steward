@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Changed
+- Synchronize the mainline security and provider-action behavior into the develop release line.
+
 ### Security
 - Disable the plugin when its API URL, authentication, or agent identity is missing; default agent auto-registration to off and require an explicit tenant-scoped API key when it is enabled.
 - Proxy request-signing coverage now verifies the fail-closed default and the explicit development-mode opt-in under an isolated, fully restored environment.

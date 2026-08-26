@@ -5,6 +5,7 @@ All notable changes to `@stwd/react` are documented here.
 ## Unreleased
 
 ### Fixed
+- Back-merge synchronization keeps the linked-account and passkey autofill fixes together with their rendered-boundary test coverage.
 - `StewardLogin` no longer emits the `webauthn` autocomplete token on the email input, so browser passkey conditional-mediation autofill cannot hijack a brand-new-email signup. Explicit passkey button flow is unchanged.
 
 ### Changed
