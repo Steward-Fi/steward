@@ -143,6 +143,7 @@ COPY packages/attestation packages/attestation
 COPY packages/auth        packages/auth
 COPY packages/db          packages/db
 COPY packages/plugin-capabilities packages/plugin-capabilities
+COPY packages/plugin-example     packages/plugin-example
 COPY packages/plugin-trading packages/plugin-trading
 COPY packages/plugin-wxmr packages/plugin-wxmr
 COPY packages/provider-github packages/provider-github
@@ -176,6 +177,7 @@ RUN mkdir -p node_modules/@stwd && \
     ln -sf ../../packages/webhooks      node_modules/@stwd/webhooks && \
     ln -sf ../../packages/policy-engine     node_modules/@stwd/policy-engine && \
     ln -sf ../../packages/plugin-capabilities node_modules/@stwd/plugin-capabilities && \
+    ln -sf ../../packages/plugin-example node_modules/@stwd/plugin-example && \
     ln -sf ../../packages/plugin-trading    node_modules/@stwd/plugin-trading && \
     ln -sf ../../packages/plugin-wxmr       node_modules/@stwd/plugin-wxmr && \
     ln -sf ../../packages/provider-github   node_modules/@stwd/provider-github && \
@@ -259,6 +261,7 @@ COPY --from=build /app/packages/attestation packages/attestation
 COPY --from=build /app/packages/auth        packages/auth
 COPY --from=build /app/packages/db          packages/db
 COPY --from=build /app/packages/plugin-capabilities packages/plugin-capabilities
+COPY --from=build /app/packages/plugin-example packages/plugin-example
 COPY --from=build /app/packages/plugin-trading packages/plugin-trading
 COPY --from=build /app/packages/plugin-wxmr packages/plugin-wxmr
 COPY --from=build /app/packages/provider-github packages/provider-github

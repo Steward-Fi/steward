@@ -38,18 +38,7 @@ try {
     console.log(JSON.stringify({ phase, plugins: result }));
   }
 } catch (error) {
-  const diagnostics = redactedThrownDiagnostics(error);
-  // Migration failures are already constrained to the checked-in `[migrate]`
-  // error vocabulary. Preserve that bounded message so container startup logs
-  // identify the failed invariant without exposing arbitrary driver details.
-  if (error instanceof Error && error.message.startsWith("[migrate]")) {
-    console.error("[steward:migrate-production] failed", {
-      ...diagnostics,
-      errorMessage: error.message.slice(0, 300),
-    });
-  } else {
-    console.error("[steward:migrate-production] failed", diagnostics);
-  }
+  console.error("[steward:migrate-production] failed", redactedThrownDiagnostics(error));
   process.exitCode = 1;
 } finally {
   const { closeDb } = await import("@stwd/db");
