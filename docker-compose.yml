@@ -142,6 +142,10 @@ services:
       MIGRATION_DATABASE_URL: "${MIGRATION_DATABASE_URL:?MIGRATION_DATABASE_URL must be set}"
       STEWARD_PLUGINS: "${STEWARD_PLUGINS:-}"
       STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:-}"
+      # The composition module builds the same vault-aware context as runtime
+      # when schema-owning plugins are enabled, and validates this boundary at
+      # import even for a lean deployment.
+      STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?STEWARD_MASTER_PASSWORD must be set}"
     depends_on:
       steward-core-migrate-final:
         condition: service_completed_successfully
