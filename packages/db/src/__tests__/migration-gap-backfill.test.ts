@@ -41,6 +41,7 @@ describe("merged migration gap backfill", () => {
       "0121_trade_order_recovery",
       "0122_provider_action_audit_outbox_delivery",
       "0123_personal_lifecycle_invariants",
+      "0114_passkey_rp_provenance",
     ]);
   });
 });

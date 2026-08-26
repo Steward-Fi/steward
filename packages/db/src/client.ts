@@ -375,7 +375,7 @@ interface NeonTransactionRequestEnv extends DatabaseSecurityEnv {
 
 interface NeonTransactionPoolConfig {
   connectionString: string;
-  max: 1;
+  max: 2;
   connectionTimeoutMillis: number;
   idleTimeoutMillis: number;
   query_timeout: number;
@@ -411,7 +411,9 @@ export function __buildNeonTransactionPoolConfigForTests(
   const serverMs = NEON_TRANSACTION_DEADLINE_MS - DATABASE_DEADLINE_CLEANUP_GRACE_MS;
   return {
     connectionString: withServerDeadlineInUrl(connectionString, NEON_TRANSACTION_DEADLINE_MS),
-    max: 1,
+    // One socket serves the request transaction and one serves the autonomous
+    // commit/audit phase. A single connection deadlocks when both are needed.
+    max: 2,
     connectionTimeoutMillis: NEON_TRANSACTION_CONNECT_TIMEOUT_MS,
     idleTimeoutMillis: NEON_TRANSACTION_DEADLINE_MS,
     query_timeout: NEON_TRANSACTION_DEADLINE_MS,

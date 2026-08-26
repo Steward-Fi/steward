@@ -32,6 +32,40 @@ type AppliedMigrationLedgerEntry = {
 };
 
 const SHA256_HEX = /^[a-f0-9]{64}$/;
+const SHIPPED_COLLISION_TIMESTAMP = 1787306400000;
+const SHIPPED_COLLISION_TAGS = [
+  "0114_durable_wallet_claim_account_audit",
+  "0118_generic_intent_execution_delete_fence",
+] as const;
+
+function shippedCollisionHashes(): Set<string> {
+  return new Set(
+    SHIPPED_COLLISION_TAGS.map((tag) =>
+      createHash("sha256")
+        .update(readFileSync(new URL(`../drizzle/${tag}.sql`, import.meta.url)))
+        .digest("hex"),
+    ),
+  );
+}
+
+/** The 0114/0118 timestamp collision is historical and explicitly shipped. */
+function hasOnlyShippedTimestampCollision(entries: readonly MigrationLedgerEntry[]): boolean {
+  const groups = new Map<number, MigrationLedgerEntry[]>();
+  for (const entry of entries) {
+    const group = groups.get(entry.createdAt) ?? [];
+    group.push(entry);
+    groups.set(entry.createdAt, group);
+  }
+  const duplicates = [...groups.entries()].filter(([, group]) => group.length > 1);
+  if (duplicates.length !== 1) return false;
+  const [timestamp, group] = duplicates[0]!;
+  return (
+    timestamp === SHIPPED_COLLISION_TIMESTAMP &&
+    group.length === 2 &&
+    new Set(group.map((entry) => entry.hash)).size === 2 &&
+    [...shippedCollisionHashes()].every((hash) => group.some((entry) => entry.hash === hash))
+  );
+}
 
 function normalizeAppliedEntry(
   entry: AppliedMigrationLedgerEntry,
@@ -108,7 +142,9 @@ export function assessMigrationLedger(
   const normalizedRequired = required as MigrationLedgerEntry[];
   const normalizedKnown = known as MigrationLedgerEntry[];
   const hasDuplicateCreatedAt = [normalizedApplied, normalizedRequired, normalizedKnown].some(
-    (entries) => new Set(entries.map((entry) => entry.createdAt)).size !== entries.length,
+    (entries) =>
+      new Set(entries.map((entry) => entry.createdAt)).size !== entries.length &&
+      !hasOnlyShippedTimestampCollision(entries),
   );
   if (
     hasDuplicateCreatedAt ||
@@ -180,7 +216,10 @@ export function getMigrationLedgerExpectation(): MigrationLedgerExpectation {
       createdAt: entry.when as number,
     };
   });
-  if (new Set(entries.map((entry) => entry.createdAt)).size !== entries.length) {
+  if (
+    new Set(entries.map((entry) => entry.createdAt)).size !== entries.length &&
+    !hasOnlyShippedTimestampCollision(entries)
+  ) {
     throw new Error("migration journal contains duplicate timestamps");
   }
   return { entries };
