@@ -35,7 +35,12 @@
  * of running both construction steps — trading-free.
  */
 
-import { platformAuthMiddleware } from "@stwd/auth";
+import {
+  platformAuthMiddleware,
+  SmsChallengeInProgressError,
+  SmsDeliveryError,
+  SmsVerificationError,
+} from "@stwd/auth";
 import { redactedThrownDiagnostics } from "@stwd/shared";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
@@ -54,7 +59,7 @@ import { agentEnrollRoutes } from "./routes/agent-enroll";
 import { agentRoutes, createAgentBatch } from "./routes/agents";
 import { approvalRoutes } from "./routes/approvals";
 import { auditRoutes } from "./routes/audit";
-import { authRoutes } from "./routes/auth";
+import { authRoutes, validatePhoneAuthProviderEnvironment } from "./routes/auth";
 import { conditionSetRoutes } from "./routes/condition-sets";
 import { dashboardRoutes } from "./routes/dashboard";
 import { identityDiscoveryRoutes } from "./routes/discovery";
@@ -98,6 +103,7 @@ const startTime = Date.now();
  * composition root (see compose.ts).
  */
 export function createApp(): Hono<{ Variables: AppVariables }> {
+  validatePhoneAuthProviderEnvironment();
   const app = new Hono<{ Variables: AppVariables }>();
 
   // ─── Global error handler ───────────────────────────────────────────────────
@@ -107,6 +113,30 @@ export function createApp(): Hono<{ Variables: AppVariables }> {
 
     if (err instanceof SyntaxError || err.message?.includes("JSON")) {
       return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+    }
+
+    if (err instanceof SmsChallengeInProgressError) {
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error: "Another SMS verification is already in progress. Complete it or try later.",
+        },
+        409,
+      );
+    }
+
+    if (err instanceof SmsDeliveryError) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "SMS could not be sent. Please try again later." },
+        503,
+      );
+    }
+
+    if (err instanceof SmsVerificationError) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "SMS verification is temporarily unavailable. Please try again." },
+        503,
+      );
     }
 
     console.error(`[${requestId}] Unhandled API error`, redactedThrownDiagnostics(err));

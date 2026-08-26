@@ -77,6 +77,7 @@ import {
   isDevSecretAllowed,
   isValidE164,
   type MagicLinkTemplateData,
+  type ManagedSmsOtpProvider,
   MockEmailInbox,
   MockEmailProvider,
   MockSmsInbox,
@@ -91,7 +92,9 @@ import {
   ResendProvider,
   renderCustomTemplate,
   revocationStore,
+  SmsChallengeInProgressError,
   type SmsProvider,
+  SmsVerificationNotAttemptedError,
   type StoreBackend,
   type StoredRecoveryCode,
   signAccessToken,
@@ -99,6 +102,7 @@ import {
   type TelegramLoginPayload,
   TokenStore,
   TwilioSmsProvider,
+  TwilioVerifyProvider,
   uint8ArrayToBase64url,
   unusedRecoveryCodeCount,
   verifyFarcasterLogin,
@@ -590,24 +594,57 @@ export async function getSmsVerifyFailedAttempts(phone: string, purpose: string)
   return attempts.filter((value) => value !== null).length;
 }
 
+export type SmsVerifyAttemptClaim = {
+  key: string;
+  token: string;
+};
+
 /**
  * Atomically reserve one of the five verification-attempt slots. Using
  * set-if-absent slots keeps the limit correct under concurrent requests on
  * every shipped backend without relying on a read-then-write counter.
  */
-export async function claimSmsVerifyAttempt(phone: string, purpose: string): Promise<boolean> {
+export async function claimSmsVerifyAttempt(
+  phone: string,
+  purpose: string,
+): Promise<SmsVerifyAttemptClaim | null> {
   for (let slot = 1; slot <= SMS_VERIFY_MAX_FAILED_ATTEMPTS; slot++) {
-    if (
-      await getMfaBackend().setIfNotExists(
-        smsVerifyAttemptSlotKey(phone, purpose, slot),
-        "1",
-        SMS_VERIFY_FAILED_ATTEMPT_TTL_MS,
-      )
-    ) {
-      return true;
+    const key = smsVerifyAttemptSlotKey(phone, purpose, slot);
+    const token = `sms-verify-attempt:${randomBytes(16).toString("hex")}`;
+    if (await getMfaBackend().setIfNotExists(key, token, SMS_VERIFY_FAILED_ATTEMPT_TTL_MS)) {
+      return { key, token };
     }
   }
-  return false;
+  return null;
+}
+
+/** Release only the exact slot generation claimed by this request. */
+export async function releaseSmsVerifyAttempt(claim: SmsVerifyAttemptClaim): Promise<boolean> {
+  try {
+    return await getMfaBackend().compareDelete(claim.key, claim.token);
+  } catch {
+    // Rollback is best-effort and generation-exact. A storage outage keeps the
+    // slot consumed (fail closed) without replacing the original provider error.
+    return false;
+  }
+}
+
+/**
+ * Roll back claim-first accounting only when no provider check could have run.
+ * Timeout/5xx/malformed outcomes retain the slot because the remote service may
+ * already have evaluated the guess.
+ */
+export async function releaseUnattemptedSmsVerifyClaim(
+  claim: SmsVerifyAttemptClaim,
+  error: unknown,
+): Promise<boolean> {
+  if (
+    !(error instanceof SmsChallengeInProgressError) &&
+    !(error instanceof SmsVerificationNotAttemptedError)
+  ) {
+    return false;
+  }
+  return releaseSmsVerifyAttempt(claim);
 }
 
 export async function recordSmsVerifyFailure(phone: string, purpose: string): Promise<void> {
@@ -2861,27 +2898,54 @@ export function getPhoneAuth(): PhoneAuth {
   if (_phoneAuth) return _phoneAuth;
 
   let provider: SmsProvider | undefined;
+  let managedProvider: ManagedSmsOtpProvider | undefined;
   if (process.env.SMS_PROVIDER === "mock" && process.env.NODE_ENV !== "production") {
     provider = new MockSmsProvider();
-  } else if (
-    process.env.TWILIO_ACCOUNT_SID &&
-    process.env.TWILIO_AUTH_TOKEN &&
-    process.env.TWILIO_FROM
-  ) {
-    provider = new TwilioSmsProvider({
-      accountSid: process.env.TWILIO_ACCOUNT_SID,
-      authToken: process.env.TWILIO_AUTH_TOKEN,
-      from: process.env.TWILIO_FROM,
-    });
-  } else if (process.env.NODE_ENV === "production") {
-    throw new Error("SMS provider not configured");
+  } else {
+    managedProvider = buildTwilioVerifyProviderFromEnvironment();
+    if (
+      !managedProvider &&
+      process.env.TWILIO_ACCOUNT_SID &&
+      process.env.TWILIO_AUTH_TOKEN &&
+      process.env.TWILIO_FROM
+    ) {
+      provider = new TwilioSmsProvider({
+        accountSid: process.env.TWILIO_ACCOUNT_SID,
+        authToken: process.env.TWILIO_AUTH_TOKEN,
+        from: process.env.TWILIO_FROM,
+      });
+    } else if (!managedProvider && process.env.NODE_ENV === "production") {
+      throw new Error("SMS provider not configured");
+    }
   }
 
   _phoneAuth = new PhoneAuth({
     provider,
+    managedProvider,
     tokenStore: new TokenStore({ backend: getMfaBackend() }),
   });
   return _phoneAuth;
+}
+
+function buildTwilioVerifyProviderFromEnvironment(
+  env: NodeJS.ProcessEnv = process.env,
+): TwilioVerifyProvider | undefined {
+  const verifyConfigured =
+    env.TWILIO_VERIFY_SERVICE_SID !== undefined ||
+    env.TWILIO_VERIFY_TOKEN_TTL_SECONDS !== undefined;
+  if (!verifyConfigured) return undefined;
+  return new TwilioVerifyProvider({
+    accountSid: env.TWILIO_ACCOUNT_SID ?? "",
+    authToken: env.TWILIO_AUTH_TOKEN ?? "",
+    serviceSid: env.TWILIO_VERIFY_SERVICE_SID ?? "",
+    tokenTtlSeconds: Number(env.TWILIO_VERIFY_TOKEN_TTL_SECONDS),
+  });
+}
+
+/** Fail app construction before health/readiness can accept malformed Verify config. */
+export function validatePhoneAuthProviderEnvironment(env: NodeJS.ProcessEnv = process.env): void {
+  if (env.SMS_PROVIDER === "mock" && env.NODE_ENV !== "production") return;
+  buildTwilioVerifyProviderFromEnvironment(env);
 }
 
 function isWhatsAppOtpEnabled(): boolean {
@@ -3279,6 +3343,7 @@ async function buildAuthOrMfaResponse(
     const { expiresAt } = await getPhoneAuth().sendOtp(
       smsMfa.phone,
       smsMfaChallengePurpose(challenge.challengeId),
+      "sms",
     );
     return {
       ok: true,
@@ -5794,7 +5859,11 @@ auth.post("/sms/send", async (c) => {
 
   let expiresAt: Date;
   try {
-    ({ expiresAt } = await getPhoneAuth().sendOtp(body.phone, smsLoginPurpose(resolvedTenantId)));
+    ({ expiresAt } = await getPhoneAuth().sendOtp(
+      body.phone,
+      smsLoginPurpose(resolvedTenantId),
+      "sms",
+    ));
   } catch (err) {
     if (err instanceof Error && err.message === "SMS provider not configured") {
       return c.json<ApiResponse>({ ok: false, error: "SMS provider not configured" }, 503);
@@ -5837,7 +5906,8 @@ auth.post("/sms/verify", async (c) => {
   // Claim-first: atomically consume one attempt slot BEFORE verifying, so
   // concurrent requests cannot both pass a check-then-record boundary and
   // stretch the attempt budget (~2x under a race).
-  if (!(await claimSmsVerifyAttempt(body.phone, otpPurpose))) {
+  const attemptClaim = await claimSmsVerifyAttempt(body.phone, otpPurpose);
+  if (!attemptClaim) {
     return c.json<ApiResponse>(
       {
         ok: false,
@@ -5847,7 +5917,13 @@ auth.post("/sms/verify", async (c) => {
     );
   }
 
-  const result = await getPhoneAuth().verifyOtp(body.phone, body.code, otpPurpose);
+  let result: Awaited<ReturnType<PhoneAuth["verifyOtp"]>>;
+  try {
+    result = await getPhoneAuth().verifyOtp(body.phone, body.code, otpPurpose);
+  } catch (error) {
+    await releaseUnattemptedSmsVerifyClaim(attemptClaim, error);
+    throw error;
+  }
   if (!result.valid) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired code" }, 401);
   }
@@ -5961,6 +6037,7 @@ auth.post("/whatsapp/send", async (c) => {
     ({ expiresAt } = await getPhoneAuth().sendOtp(
       body.phone,
       whatsappLoginPurpose(resolvedTenantId),
+      "whatsapp",
     ));
   } catch (err) {
     if (err instanceof Error && err.message === "SMS provider not configured") {
@@ -6008,7 +6085,8 @@ auth.post("/whatsapp/verify", async (c) => {
   // Claim-first: atomically consume one attempt slot BEFORE verifying, so
   // concurrent requests cannot both pass a check-then-record boundary and
   // stretch the attempt budget (~2x under a race).
-  if (!(await claimSmsVerifyAttempt(body.phone, otpPurpose))) {
+  const attemptClaim = await claimSmsVerifyAttempt(body.phone, otpPurpose);
+  if (!attemptClaim) {
     return c.json<ApiResponse>(
       {
         ok: false,
@@ -6018,7 +6096,13 @@ auth.post("/whatsapp/verify", async (c) => {
     );
   }
 
-  const result = await getPhoneAuth().verifyOtp(body.phone, body.code, otpPurpose);
+  let result: Awaited<ReturnType<PhoneAuth["verifyOtp"]>>;
+  try {
+    result = await getPhoneAuth().verifyOtp(body.phone, body.code, otpPurpose);
+  } catch (error) {
+    await releaseUnattemptedSmsVerifyClaim(attemptClaim, error);
+    throw error;
+  }
   if (!result.valid) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired code" }, 401);
   }
@@ -7368,6 +7452,7 @@ auth.post("/mfa/sms/enroll", async (c) => {
     ({ expiresAt } = await getPhoneAuth().sendOtp(
       body.phone,
       smsMfaEnrollPurpose(session.payload.userId),
+      "sms",
     ));
   } catch (err) {
     if (err instanceof Error && err.message === "SMS provider not configured") {
@@ -7422,14 +7507,21 @@ auth.post("/mfa/sms/verify", async (c) => {
   const pendingPurpose = pending.purpose ?? smsMfaEnrollPurpose(session.payload.userId);
   // Claim-first: atomically consume one attempt slot BEFORE verifying, so
   // concurrent requests cannot both pass a check-then-record boundary.
-  if (!(await claimSmsVerifyAttempt(pending.phone, pendingPurpose))) {
+  const attemptClaim = await claimSmsVerifyAttempt(pending.phone, pendingPurpose);
+  if (!attemptClaim) {
     return c.json<ApiResponse>(
       { ok: false, error: "Too many invalid SMS verification attempts. Request a new code." },
       429,
     );
   }
 
-  const verified = await getPhoneAuth().verifyOtp(pending.phone, body.code, pendingPurpose);
+  let verified: Awaited<ReturnType<PhoneAuth["verifyOtp"]>>;
+  try {
+    verified = await getPhoneAuth().verifyOtp(pending.phone, body.code, pendingPurpose);
+  } catch (error) {
+    await releaseUnattemptedSmsVerifyClaim(attemptClaim, error);
+    throw error;
+  }
   if (!verified.valid) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired code" }, 401);
   }
@@ -7502,6 +7594,7 @@ auth.post("/mfa/sms/send", async (c) => {
     ({ expiresAt } = await getPhoneAuth().sendOtp(
       smsMfa.phone,
       smsMfaManagePurpose(session.payload.userId),
+      "sms",
     ));
   } catch (err) {
     if (err instanceof Error && err.message === "SMS provider not configured") {
@@ -7550,7 +7643,8 @@ auth.post("/mfa/sms/complete", async (c) => {
   const otpPurpose = smsMfaChallengePurpose(body.challengeId);
   // Claim-first: atomically consume one attempt slot BEFORE verifying, so
   // concurrent requests cannot both pass a check-then-record boundary.
-  if (!(await claimSmsVerifyAttempt(smsMfa.phone, otpPurpose))) {
+  const attemptClaim = await claimSmsVerifyAttempt(smsMfa.phone, otpPurpose);
+  if (!attemptClaim) {
     return c.json<ApiResponse>(
       {
         ok: false,
@@ -7560,7 +7654,13 @@ auth.post("/mfa/sms/complete", async (c) => {
     );
   }
 
-  const verified = await getPhoneAuth().verifyOtp(smsMfa.phone, body.code, otpPurpose);
+  let verified: Awaited<ReturnType<PhoneAuth["verifyOtp"]>>;
+  try {
+    verified = await getPhoneAuth().verifyOtp(smsMfa.phone, body.code, otpPurpose);
+  } catch (error) {
+    await releaseUnattemptedSmsVerifyClaim(attemptClaim, error);
+    throw error;
+  }
   if (!verified.valid) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired code" }, 401);
   }
@@ -7620,14 +7720,21 @@ auth.post("/mfa/sms/step-up", async (c) => {
   const otpPurpose = smsMfaManagePurpose(session.payload.userId);
   // Claim-first: atomically consume one attempt slot BEFORE verifying, so
   // concurrent requests cannot both pass a check-then-record boundary.
-  if (!(await claimSmsVerifyAttempt(smsMfa.phone, otpPurpose))) {
+  const attemptClaim = await claimSmsVerifyAttempt(smsMfa.phone, otpPurpose);
+  if (!attemptClaim) {
     return c.json<ApiResponse>(
       { ok: false, error: "Too many invalid SMS verification attempts. Request a new code." },
       429,
     );
   }
 
-  const verified = await getPhoneAuth().verifyOtp(smsMfa.phone, body.code, otpPurpose);
+  let verified: Awaited<ReturnType<PhoneAuth["verifyOtp"]>>;
+  try {
+    verified = await getPhoneAuth().verifyOtp(smsMfa.phone, body.code, otpPurpose);
+  } catch (error) {
+    await releaseUnattemptedSmsVerifyClaim(attemptClaim, error);
+    throw error;
+  }
   if (!verified.valid) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired code" }, 401);
   }
@@ -7860,7 +7967,8 @@ auth.post("/mfa/sms/unenroll", async (c) => {
   const otpPurpose = smsMfaManagePurpose(session.payload.userId);
   // Claim-first: atomically consume one attempt slot BEFORE verifying, so
   // concurrent requests cannot both pass a check-then-record boundary.
-  if (!(await claimSmsVerifyAttempt(smsMfa.phone, otpPurpose))) {
+  const attemptClaim = await claimSmsVerifyAttempt(smsMfa.phone, otpPurpose);
+  if (!attemptClaim) {
     return c.json<ApiResponse>(
       {
         ok: false,
@@ -7869,7 +7977,13 @@ auth.post("/mfa/sms/unenroll", async (c) => {
       429,
     );
   }
-  const verified = await getPhoneAuth().verifyOtp(smsMfa.phone, body.code, otpPurpose);
+  let verified: Awaited<ReturnType<PhoneAuth["verifyOtp"]>>;
+  try {
+    verified = await getPhoneAuth().verifyOtp(smsMfa.phone, body.code, otpPurpose);
+  } catch (error) {
+    await releaseUnattemptedSmsVerifyClaim(attemptClaim, error);
+    throw error;
+  }
   if (!verified.valid) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired code" }, 401);
   }
