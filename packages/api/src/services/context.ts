@@ -771,6 +771,27 @@ export async function withAuthenticatedTenantDatabase<T>(
   );
 }
 
+/**
+ * Commit an autonomous tenant-RLS unit while the request transaction remains
+ * open. This is used for non-replayable pre-I/O checkpoints and evidence.
+ */
+export async function withIndependentAuthenticatedTenantDatabase<T>(
+  tenantId: string,
+  method: string,
+  subject: string,
+  callback: () => Promise<T>,
+  userId?: string,
+): Promise<T> {
+  const context = tenantContextFromAuthenticatedPrincipal({ tenantId, method, subject, userId });
+  const driver = isPGLiteRuntime ? "pglite" : getDatabaseDriver();
+  const { withIndependentDatabase } = await import("@stwd/db");
+  return withIndependentDatabase((independentDb) =>
+    withTenantRlsTransaction(independentDb as never, driver, context, async (tx) =>
+      withTenantTransactionDatabase(tx as never, { tenantId, userId }, callback),
+    ),
+  );
+}
+
 export async function continueWithTenantDatabase(
   tenantId: string,
   method: string,

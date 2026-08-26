@@ -152,11 +152,36 @@ export function assertDatabaseUrlTls(
   );
 }
 
-export function createPostgresClient(connectionString = getDatabaseUrl()) {
+export interface PostgresClientTimeoutOptions {
+  max?: number;
+  connectTimeoutSeconds?: number;
+  statementTimeoutMs?: number;
+  lockTimeoutMs?: number;
+  idleInTransactionTimeoutMs?: number;
+}
+
+export function createPostgresClient(
+  connectionString = getDatabaseUrl(),
+  options: PostgresClientTimeoutOptions = {},
+) {
   assertDatabaseUrlTls(connectionString);
   return postgres(connectionString, {
-    max: 10,
+    max: options.max ?? 10,
     prepare: false,
+    ...(options.connectTimeoutSeconds ? { connect_timeout: options.connectTimeoutSeconds } : {}),
+    ...(options.statementTimeoutMs || options.lockTimeoutMs || options.idleInTransactionTimeoutMs
+      ? {
+          connection: {
+            ...(options.statementTimeoutMs
+              ? { statement_timeout: options.statementTimeoutMs }
+              : {}),
+            ...(options.lockTimeoutMs ? { lock_timeout: options.lockTimeoutMs } : {}),
+            ...(options.idleInTransactionTimeoutMs
+              ? { idle_in_transaction_session_timeout: options.idleInTransactionTimeoutMs }
+              : {}),
+          },
+        }
+      : {}),
   });
 }
 
@@ -296,8 +321,11 @@ export async function withDatabaseDeadline<T>(
 
 // ─── postgres-js (Bun/Node) ───────────────────────────────────────────────────
 
-export function createDb(connectionString = getDatabaseUrl()) {
-  const client = createPostgresClient(connectionString);
+export function createDb(
+  connectionString = getDatabaseUrl(),
+  options: PostgresClientTimeoutOptions = {},
+) {
+  const client = createPostgresClient(connectionString, options);
   const db = drizzlePostgres(client, { schema: FULL_SCHEMA });
 
   return { client, db };
@@ -481,6 +509,11 @@ export function setPGLiteOverride(
   pgliteOverride = { db, close };
 }
 
+/** Whether getDb() is currently backed by the embedded PGLite override. */
+export function hasPGLiteOverride(): boolean {
+  return pgliteOverride !== undefined;
+}
+
 // ─── Request-scoped database propagation ────────────────────────────────────
 
 type RequestDatabase = ReturnType<typeof createDb>["db"];
@@ -493,6 +526,7 @@ interface RequestDatabaseContext {
   isolationLevel?: "repeatable read";
   readOnly?: boolean;
   pendingTasks: Set<Promise<unknown>>;
+  afterCommitTasks?: Array<() => void | Promise<void>>;
   guardedObjects: WeakMap<object, object>;
 }
 const requestDatabaseStorage = new AsyncLocalStorage<RequestDatabaseContext>();
@@ -668,6 +702,7 @@ export async function withTenantTransactionDatabase<T>(
   identity: { tenantId: string; userId?: string },
   callback: () => Promise<T>,
   characteristics?: { isolationLevel?: "repeatable read"; readOnly?: boolean },
+  afterCommitTasks?: Array<() => void | Promise<void>>,
 ): Promise<T> {
   if (tenantTransactionDatabaseStorage.getStore()) {
     throw new Error("RLS_TENANT_DATABASE_CONTEXT_NESTED");
@@ -681,6 +716,7 @@ export async function withTenantTransactionDatabase<T>(
     isolationLevel: characteristics?.isolationLevel,
     readOnly: characteristics?.readOnly,
     pendingTasks: new Set(),
+    afterCommitTasks,
     guardedObjects: new WeakMap(),
   };
   context.db = guardRequestDatabaseValue(transactionDb, context);
@@ -694,6 +730,32 @@ export async function withTenantTransactionDatabase<T>(
     context.active = false;
     context.db = undefined;
   }
+}
+
+/**
+ * Defer a side effect until the owner of the active tenant transaction has
+ * observed a successful outer commit. Returns false when no commit owner is
+ * present so callers can perform the side effect immediately.
+ */
+export function afterTenantTransactionCommit(task: () => void | Promise<void>): boolean {
+  const context = tenantTransactionDatabaseStorage.getStore();
+  if (!context?.active || !context.afterCommitTasks) return false;
+  context.afterCommitTasks.push(task);
+  return true;
+}
+
+/**
+ * Run a bounded operation outside the active tenant transaction. PGLite has no
+ * independent connection/commit boundary, so it fails closed in that mode.
+ */
+export async function withIndependentDatabase<T>(
+  callback: (db: RequestDatabase) => Promise<T>,
+): Promise<T> {
+  const tenantContext = tenantTransactionDatabaseStorage.getStore();
+  if (!tenantContext) return callback(getDb());
+  assertRequestDatabaseContextActive(tenantContext);
+  if (pgliteOverride) throw new Error("RLS_INDEPENDENT_TRANSACTION_UNSUPPORTED_PGLITE");
+  return tenantTransactionDatabaseStorage.exit(() => callback(getDb()));
 }
 
 /**
