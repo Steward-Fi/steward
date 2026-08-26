@@ -178,6 +178,12 @@ jobs:
             # PGLite migrations can exceed Bun's 5s default on hosted runners.
             # Keep file isolation while honoring the package's 30s test budget.
             bun test --isolate --timeout 30000 packages/trade-sessions
+          elif [ "${{ matrix.package }}" = "packages/vault" ]; then
+            # Vault's isolated PGLite suites include KMS/external-custody cases
+            # that can exceed Bun's 5s default on hosted runners under load.
+            # Keep file isolation while allowing the suite's existing work to
+            # complete instead of reporting a spurious hook timeout.
+            bun test --isolate --timeout 30000 packages/vault
           else
             bun test --isolate ${{ matrix.package }}
           fi
