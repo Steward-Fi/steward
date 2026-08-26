@@ -670,6 +670,7 @@ BEGIN
           'steward_bootstrap.session_subject(uuid,text)',
           'steward_bootstrap.tenant_api_key_subject(text)',
           'steward_bootstrap.tenant_ids_for_internal_job()',
+          'steward_bootstrap.tenant_set_user_deactivation(text,uuid,uuid,boolean)',
           'steward_bootstrap.user_token_revocation_subject(uuid)'
         ])
         OR has_function_privilege(
@@ -691,6 +692,7 @@ BEGIN
           'steward_bootstrap.ensure_system_tenant()',
           'steward_bootstrap.session_subject(uuid,text)',
           'steward_bootstrap.tenant_api_key_subject(text)',
+          'steward_bootstrap.tenant_set_user_deactivation(text,uuid,uuid,boolean)',
           'steward_bootstrap.user_token_revocation_subject(uuid)'
         ]))
       )
