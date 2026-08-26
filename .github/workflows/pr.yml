@@ -274,6 +274,10 @@ jobs:
             # Keep file isolation while allowing the suite's existing work to
             # complete instead of reporting a spurious hook timeout.
             bun test --isolate --timeout 300000 packages/vault
+          elif [ "${{ matrix.package }}" = "scripts/__tests__" ]; then
+            # Railway release tests exercise bounded child-process cleanup and
+            # can cross Bun's 5s per-test default on loaded hosted runners.
+            bun test --isolate --timeout 30000 scripts/__tests__
           else
             bun test --isolate ${{ matrix.package }}
           fi
