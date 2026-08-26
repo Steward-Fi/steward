@@ -132,7 +132,9 @@ describe("enforceCapabilityRateLimit", () => {
           const windowMs = Number(args[1]);
           const max = Number(args[2]);
           // No caller timestamp/window boundary is accepted by the script.
-          expect(args).toHaveLength(5);
+          // The production Lua contract passes the bucket key plus window,
+          // limit, unique member, TTL buffer, and cleanup flag.
+          expect(args).toHaveLength(6);
           expect(args.map(String)).not.toContain(String(localNow));
           const live = (reservations.get(key) ?? []).filter(
             (reservedAt) => reservedAt > serverNow - windowMs,
