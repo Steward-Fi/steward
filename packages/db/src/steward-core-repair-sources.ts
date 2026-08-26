@@ -234,12 +234,68 @@ export function assertStewardCoreRepairSchema(
   }
 }
 
+function replaceReviewedMigrationFragment(
+  source: string,
+  expected: string,
+  replacement: string,
+  label: string,
+): string {
+  if (!source.includes(expected) || source.indexOf(expected) !== source.lastIndexOf(expected)) {
+    throw new Error(`${label} no longer contains its one reviewed migration fragment`);
+  }
+  return source.replace(expected, replacement);
+}
+
 export function renderStewardCoreRepairMigration(
   tag: string,
   source: string,
   schema: StewardCoreRepairSchema,
 ): string {
-  if (schema === "public") return source;
+  let rendered = source;
+  if (tag === "0108_evm_nonce_tenant_ownership") {
+    rendered = replaceReviewedMigrationFragment(
+      rendered,
+      'UPDATE "evm_wallet_nonces" SET "wallet_address" = lower("wallet_address");',
+      `ALTER TABLE "evm_wallet_nonces"
+  REPLICA IDENTITY FULL;
+--> statement-breakpoint
+UPDATE "evm_wallet_nonces" SET "wallet_address" = lower("wallet_address");`,
+      "0108 evm_wallet_nonces update",
+    );
+    rendered = replaceReviewedMigrationFragment(
+      rendered,
+      'UPDATE "evm_wallet_nonce_inflight" SET "wallet_address" = lower("wallet_address");',
+      `ALTER TABLE "evm_wallet_nonce_inflight"
+  REPLICA IDENTITY FULL;
+--> statement-breakpoint
+UPDATE "evm_wallet_nonce_inflight" SET "wallet_address" = lower("wallet_address");`,
+      "0108 evm_wallet_nonce_inflight update",
+    );
+    rendered = replaceReviewedMigrationFragment(
+      rendered,
+      `CREATE UNIQUE INDEX "evm_wallet_nonces_wallet_chain_idx"
+  ON "evm_wallet_nonces" ("tenant_id", "wallet_address", "chain_id");`,
+      `CREATE UNIQUE INDEX "evm_wallet_nonces_wallet_chain_idx"
+  ON "evm_wallet_nonces" ("tenant_id", "wallet_address", "chain_id");
+--> statement-breakpoint
+ALTER TABLE "evm_wallet_nonces"
+  REPLICA IDENTITY USING INDEX "evm_wallet_nonces_wallet_chain_idx";`,
+      "0108 evm_wallet_nonces final replica identity",
+    );
+    rendered = replaceReviewedMigrationFragment(
+      rendered,
+      `CREATE UNIQUE INDEX "evm_wallet_nonce_inflight_key_idx"
+  ON "evm_wallet_nonce_inflight" ("tenant_id", "wallet_address", "chain_id", "nonce");`,
+      `CREATE UNIQUE INDEX "evm_wallet_nonce_inflight_key_idx"
+  ON "evm_wallet_nonce_inflight" ("tenant_id", "wallet_address", "chain_id", "nonce");
+--> statement-breakpoint
+ALTER TABLE "evm_wallet_nonce_inflight"
+  REPLICA IDENTITY USING INDEX "evm_wallet_nonce_inflight_key_idx";`,
+      "0108 evm_wallet_nonce_inflight final replica identity",
+    );
+  }
+
+  if (schema === "public") return rendered;
 
   const quotedSchema = quoteStewardCoreRepairIdentifier(schema);
   if (tag === "0091_external_custody_outcome_reconciliation") {
@@ -267,7 +323,7 @@ export function renderStewardCoreRepairMigration(
     return rendered;
   }
 
-  return source;
+  return rendered;
 }
 
 export function loadStewardCoreRepairSources(
@@ -313,7 +369,8 @@ export async function queryStewardCatalog(
           'relation'::text AS kind,
           relation.relname AS object_name,
           relation.relkind::text || '|' || relation.relpersistence::text || '|' ||
-            relation.relrowsecurity::text || '|' || relation.relforcerowsecurity::text AS definition
+            relation.relrowsecurity::text || '|' || relation.relforcerowsecurity::text || '|' ||
+            relation.relreplident::text AS definition
         FROM pg_catalog.pg_class relation
         JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
         WHERE namespace.nspname = $1::text
@@ -359,6 +416,7 @@ export async function queryStewardCatalog(
           target.relname || '.' || index_relation.relname,
           index_record.indisunique::text || '|' || index_record.indisprimary::text || '|' ||
             index_record.indisvalid::text || '|' || index_record.indisready::text || '|' ||
+            index_record.indisreplident::text || '|' ||
             pg_catalog.pg_get_indexdef(index_relation.oid, 0, true)
         FROM pg_catalog.pg_index index_record
         JOIN pg_catalog.pg_class index_relation ON index_relation.oid = index_record.indexrelid

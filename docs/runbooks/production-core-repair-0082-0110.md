@@ -23,7 +23,7 @@ The operator entrypoint is `@stwd/db/steward-core-repair`. It:
 - verifies SHA-256 for immutable 0082–0110 source files;
 - verifies the exact 0082-absent/0083-present catalog discontinuity;
 - verifies all 47 catalog records introduced or changed by the existing 0083;
-- verifies the exact pre-repair value for every one of the 391 catalog keys the
+- verifies the exact pre-repair value for every one of the 392 catalog keys the
   bundle changes;
 - pins the complete set and exact definitions of all noninternal triggers (7
   before repair and 21 after repair) and every function resolved through their
@@ -33,7 +33,10 @@ The operator entrypoint is `@stwd/db/steward-core-repair`. It:
   locks;
 - applies exact 0082 and exact 0084–0110 in one serializable transaction while
   skipping 0083;
-- renders only the reviewed target-schema bindings in 0091 and 0110;
+- renders only the reviewed target-schema bindings in 0091 and 0110, plus the
+  reviewed 0108 replica-identity envelope: `FULL` while legacy nonce indexes
+  are replaced, then the new tenant-aware unique indexes as the durable
+  replica identities;
 - resolves the configured target through `pg_catalog.current_schema()` before
   changing `search_path`; requires the effective operator to own the target
   schema (or its database-owned `public` schema), rejects third-party `CREATE`
@@ -51,6 +54,9 @@ The operator entrypoint is `@stwd/db/steward-core-repair`. It:
   bound-function sets to the checked-in public or steward manifest before it
   records provenance, then repeats the reviewed catalog phase and both exact
   trigger surfaces after provenance DDL and immediately before commit; and
+- includes both `pg_class.relreplident` and `pg_index.indisreplident` in the
+  exact catalog, so a published nonce table cannot silently lose its usable
+  update/delete identity; and
 - records source hash, rendered hash, target schema, source head, and bundle
   hash in schema-local `__steward_core_repair_migrations` rows.
 
@@ -63,7 +69,7 @@ production database and is never read or written by this bundle.
 
 The generated 0084–0110 slice reproduces the independent preflight envelope:
 152 columns, 70 explicit constraints, one enum label, 14 functions, 39 indexes,
-11 relations, and 14 triggers. PostgreSQL 18 also exposes NOT NULL constraints
+12 relations, and 14 triggers. PostgreSQL 18 also exposes NOT NULL constraints
 as catalog records; the exact manifest retains and checks those additional
 records instead of dropping them from the gate.
 
@@ -119,6 +125,14 @@ For the observed production envelope, inspection fails unless:
 - there are no Google consequential-write operations requiring the 0102 data
   rewrite; and
 - every EVM nonce namespace has exactly one resolvable tenant owner.
+
+The exact production discontinuity also has
+`evm_wallet_nonces_wallet_chain_idx` selected as the nonce-counter replica
+identity and `evm_wallet_nonce_inflight` still on its unusable default identity.
+The rendered 0108 repair temporarily uses `REPLICA IDENTITY FULL` across the
+legacy index replacement and commits with both new tenant-aware nonce indexes
+selected as replica identities. Any other before/after identity shape fails the
+catalog gate.
 
 The reviewed manifest also requires the optional `capability_grants` plugin
 table to be absent. Migration 0110 conditionally mutates that table when it is
@@ -211,7 +225,9 @@ The focused test creates and destroys isolated databases for both layouts. It
 builds the exact through-0081 floor, installs 0083 without 0082, preserves a
 sentinel shared Eliza ledger, runs a read-only inspection, applies the repair,
 checks all source/rendered hashes and catalog postconditions, exercises a
-deterministically owned EVM nonce namespace, and proves idempotent inspection.
+deterministically owned EVM nonce namespace, publishes the inflight nonce table
+for updates, proves the repair and a post-repair update succeed, and proves
+idempotent inspection.
 It also proves missing 0083 and an unresolved nonce namespace fail before any
 repair DDL or ledger row is retained.
 

@@ -4,7 +4,7 @@
   "productionDatabaseTouched": false,
   "targetSchema": "steward",
   "repairVersion": "prod-core-0082-0110-v1",
-  "catalogManifestSha256": "68625735e70c43faada6365e842cbd0faf974526d0510111f06a7c5d6f2fae90",
+  "catalogManifestSha256": "c607422b63c7951563ff79468a562b0fc4f0e26ca6ada12e198b77def836d81d",
   "oldImage": {
     "image": "ghcr.io/steward-fi/steward@sha256:51557626b6c3215d432c7f4077b1cf44a059051d5a763384335a88270b371ca1",
     "sourceCommit": "a7b1b4d5232a234e0e3e86e600f58ef9ce8f68ad",

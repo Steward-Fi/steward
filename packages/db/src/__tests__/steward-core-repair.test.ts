@@ -88,6 +88,11 @@ async function installHistoricalFloor(
       file,
     );
   }
+  const quotedSchema = quoteStewardCoreRepairIdentifier(schema);
+  await client.unsafe(`
+    ALTER TABLE ${quotedSchema}."evm_wallet_nonces"
+      REPLICA IDENTITY USING INDEX "evm_wallet_nonces_wallet_chain_idx"
+  `);
   if (include0083) {
     await applySource(
       client,
@@ -109,13 +114,17 @@ describe("Steward production core-repair source envelope", () => {
     expect(() => loadStewardCoreRepairSources("steward")).not.toThrow();
   });
 
-  test("renders only the reviewed 0091 and 0110 public-schema bindings", () => {
+  test("renders only the reviewed 0091, 0108, and 0110 repair bindings", () => {
     const source0091 = readFileSync(
       `${migrationsFolder}/0091_external_custody_outcome_reconciliation.sql`,
       "utf8",
     );
     const source0110 = readFileSync(
       `${migrationsFolder}/0110_agent_delete_lease_lifecycle.sql`,
+      "utf8",
+    );
+    const source0108 = readFileSync(
+      `${migrationsFolder}/0108_evm_nonce_tenant_ownership.sql`,
       "utf8",
     );
     const rendered0091 = renderStewardCoreRepairMigration(
@@ -128,6 +137,11 @@ describe("Steward production core-repair source envelope", () => {
       source0110,
       "steward",
     );
+    const rendered0108 = renderStewardCoreRepairMigration(
+      "0108_evm_nonce_tenant_ownership",
+      source0108,
+      "steward",
+    );
 
     expect(rendered0091).toContain('ALTER TYPE "steward"."transaction_status"');
     expect(rendered0091).not.toContain('"public"."transaction_status"');
@@ -135,6 +149,12 @@ describe("Steward production core-repair source envelope", () => {
     expect(rendered0110).toContain('SET search_path = pg_catalog, "steward"');
     expect(rendered0110).not.toContain("public.");
     expect(rendered0110).not.toContain("pg_catalog, public");
+    expect(source0108).not.toContain("REPLICA IDENTITY");
+    expect(splitStewardMigrationStatements(source0108)).toHaveLength(22);
+    expect(splitStewardMigrationStatements(rendered0108)).toHaveLength(26);
+    expect(rendered0108.match(/REPLICA IDENTITY FULL/g)).toHaveLength(2);
+    expect(rendered0108.match(/REPLICA IDENTITY USING INDEX/g)).toHaveLength(2);
+    expect(rendered0108).not.toContain("REPLICA IDENTITY DEFAULT");
   });
 
   test("retains the independently audited 0084-0110 catalog envelope", () => {
@@ -148,7 +168,7 @@ describe("Steward production core-repair source envelope", () => {
         enum: 1,
         function: 14,
         index: 39,
-        relation: 11,
+        relation: 12,
         trigger: 14,
       });
       const triggers = catalogManifest.schemas[schema].nonInternalTriggers;
@@ -1124,6 +1144,88 @@ postgresDescribe("Steward production core repair on disposable PostgreSQL", () =
       expect(inspection.status).toBe("eligible");
       expect(inspection.preflight?.evmNonceNamespaces).toBe(1);
       expect(inspection.preflight?.unresolvedEvmNonceNamespaces).toBe(0);
+    } finally {
+      await client.end({ timeout: 5 });
+    }
+  });
+
+  test("repairs a published nonce table and installs its durable replica identity", async () => {
+    const { client } = await createFixture("steward");
+    try {
+      await client.unsafe(`
+        CREATE PUBLICATION steward_core_repair_nonce_updates
+          FOR TABLE steward.evm_wallet_nonce_inflight
+          WITH (publish = 'update');
+        INSERT INTO steward.tenants (id, name, api_key_hash)
+        VALUES ('tenant-replica-fixture', 'Replica fixture', 'replica-fixture-key');
+        INSERT INTO steward.agents (id, tenant_id, name, wallet_address)
+        VALUES (
+          'agent-replica-fixture',
+          'tenant-replica-fixture',
+          'Replica fixture',
+          '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+        );
+        INSERT INTO steward.evm_wallet_nonce_inflight (
+          wallet_address, chain_id, nonce, state
+        ) VALUES (
+          '0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', 1, 9, 'allocated'
+        );
+      `);
+      const before = await client.unsafe<{ replica_identity: string; has_primary_key: boolean }[]>(`
+        SELECT
+          relation.relreplident AS replica_identity,
+          EXISTS (
+            SELECT 1 FROM pg_catalog.pg_index replica_index
+            WHERE replica_index.indrelid = relation.oid AND replica_index.indisprimary
+          ) AS has_primary_key
+        FROM pg_catalog.pg_class relation
+        WHERE relation.oid = 'steward.evm_wallet_nonce_inflight'::regclass
+      `);
+      expect(before).toEqual([{ replica_identity: "d", has_primary_key: false }]);
+
+      const result = await runStewardCoreRepair({
+        expectedSchema: "steward",
+        client: client as unknown as StewardCoreRepairClient,
+      });
+      expect(result.status).toBe("applied");
+
+      const after = await client.unsafe<
+        {
+          replica_identity: string;
+          replica_index_selected: boolean;
+          wallet_address: string;
+          tenant_id: string;
+        }[]
+      >(`
+        SELECT
+          relation.relreplident AS replica_identity,
+          replica_index.indisreplident AS replica_index_selected,
+          inflight.wallet_address,
+          inflight.tenant_id
+        FROM steward.evm_wallet_nonce_inflight inflight
+        CROSS JOIN pg_catalog.pg_class relation
+        CROSS JOIN pg_catalog.pg_index replica_index
+        WHERE relation.oid = 'steward.evm_wallet_nonce_inflight'::regclass
+          AND replica_index.indrelid = relation.oid
+          AND replica_index.indexrelid =
+            'steward.evm_wallet_nonce_inflight_key_idx'::regclass
+      `);
+      expect(after).toEqual([
+        {
+          replica_identity: "i",
+          replica_index_selected: true,
+          wallet_address: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          tenant_id: "tenant-replica-fixture",
+        },
+      ]);
+      const postRepairUpdate = await client.unsafe<{ state: string }[]>(`
+        UPDATE steward.evm_wallet_nonce_inflight
+        SET state = 'broadcast', updated_at = clock_timestamp()
+        WHERE wallet_address = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+          AND chain_id = 1 AND nonce = 9
+        RETURNING state
+      `);
+      expect(postRepairUpdate).toEqual([{ state: "broadcast" }]);
     } finally {
       await client.end({ timeout: 5 });
     }

@@ -50,6 +50,23 @@ describe("migration expectation", () => {
       });
     }
   });
+
+  test("accepts the complete checked-in ledger in journal order", () => {
+    const expectation = getMigrationLedgerExpectation();
+    expect(
+      expectation.entries.some(
+        (entry, index) =>
+          index > 0 && entry.createdAt < (expectation.entries[index - 1]?.createdAt ?? 0),
+      ),
+    ).toBe(true);
+    expect(assessMigrationLedger(expectation.entries, expectation.entries)).toEqual({
+      ok: true,
+      state: "exact",
+      requiredCount: expectation.entries.length,
+      actualCount: expectation.entries.length,
+      forwardCount: 0,
+    });
+  });
 });
 
 describe("migration ledger readiness", () => {
@@ -104,6 +121,23 @@ describe("migration ledger readiness", () => {
     });
   });
 
+  test("accepts an exact historical journal order with non-monotonic timestamps", () => {
+    const historicalFirst = ledgerEntry(2000, "historical-first");
+    const historicalSecond = ledgerEntry(1000, "historical-second");
+    expect(
+      assessMigrationLedger(
+        [historicalFirst, historicalSecond],
+        [historicalFirst, historicalSecond],
+      ),
+    ).toEqual({
+      ok: true,
+      state: "exact",
+      requiredCount: 2,
+      actualCount: 2,
+      forwardCount: 0,
+    });
+  });
+
   test("fails closed for missing, altered, malformed, duplicate, and non-forward entries", () => {
     const alteredRequired = ledgerEntry(required.createdAt, "altered");
     const malformedHash = { createdAt: 3000, hash: "not-a-sha256" };
@@ -121,5 +155,23 @@ describe("migration ledger readiness", () => {
       expect(assessMigrationLedger(applied, [first, required]).ok).toBe(false);
       expect(assessMigrationLedger(applied, [first, required]).state).toBe("corrupt");
     }
+  });
+
+  test("rejects reordered known migrations even when their timestamps become forward", () => {
+    const knownFirst = ledgerEntry(4000, "known-first");
+    const knownSecond = ledgerEntry(3000, "known-second");
+    expect(
+      assessMigrationLedger(
+        [first, required, knownSecond, knownFirst],
+        [first, required],
+        [first, required, knownFirst, knownSecond],
+      ),
+    ).toEqual({
+      ok: false,
+      state: "corrupt",
+      requiredCount: 2,
+      actualCount: 4,
+      forwardCount: 2,
+    });
   });
 });
