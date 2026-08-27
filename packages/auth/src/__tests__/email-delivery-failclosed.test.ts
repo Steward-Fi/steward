@@ -449,6 +449,92 @@ describe("fail-closed magic-link delivery", () => {
     auth.destroy();
   });
 
+  it("logs only the provider acceptance receipt after a successful send", async () => {
+    const backend = new CapturingBackend();
+    const recipient = "acceptance-log-recipient@example.com";
+    const subjectCanary = "acceptance-log-subject-canary";
+    const bodyCanary = "acceptance-log-body-token-canary";
+    const infoCalls: unknown[][] = [];
+    const originalInfo = console.info;
+    console.info = (...args: unknown[]) => infoCalls.push(args);
+
+    try {
+      const auth = new EmailAuth({
+        from: "login@steward.fi",
+        baseUrl: "https://steward.fi",
+        provider: {
+          send: async (to, subject, text) => {
+            expect(to).toBe(recipient);
+            expect(subject).toBe(subjectCanary);
+            expect(text).toBe(bodyCanary);
+            return { provider: "resend", id: "resend-acceptance-id-42" };
+          },
+        },
+        tokenStore: new TokenStore({ backend }),
+        codeVerifierSecret: "fail-closed-test-secret-at-least-32-characters",
+        subjectOverride: subjectCanary,
+        templateRenderer: () => ({
+          subject: subjectCanary,
+          text: bodyCanary,
+          html: `<p>${bodyCanary}</p>`,
+        }),
+      });
+
+      await auth.sendMagicLink(recipient, { tenantId: "tenant-a" });
+      expect(infoCalls).toEqual([
+        [
+          "[steward:auth] email provider accepted send",
+          { provider: "resend", messageId: "resend-acceptance-id-42" },
+        ],
+      ]);
+      const serialized = JSON.stringify(infoCalls);
+      expect(serialized).not.toContain(recipient);
+      expect(serialized).not.toContain(subjectCanary);
+      expect(serialized).not.toContain(bodyCanary);
+      expect(serialized).not.toContain("steward.fi");
+      auth.destroy();
+    } finally {
+      console.info = originalInfo;
+    }
+  });
+
+  it("never logs acceptance for rejected or invalid provider receipts", async () => {
+    const infoCalls: unknown[][] = [];
+    const errors: unknown[][] = [];
+    const originalInfo = console.info;
+    const originalError = console.error;
+    console.info = (...args: unknown[]) => infoCalls.push(args);
+    console.error = (...args: unknown[]) => errors.push(args);
+
+    try {
+      const providers = [
+        { send: async () => undefined } as unknown as EmailProvider,
+        { send: async () => ({ provider: "resend", id: "" }) },
+        { send: async () => ({ provider: "resend\u2028forged", id: "message-id" }) },
+        { send: async () => ({ provider: "resend", id: "message-id\u202Etxt" }) },
+        {
+          send: async () => {
+            throw new Error("provider rejection canary");
+          },
+        },
+      ];
+
+      for (const provider of providers) {
+        const auth = buildAuth(provider, new CapturingBackend());
+        await expect(auth.sendMagicLink("no-acceptance@example.com")).rejects.toThrow(
+          EmailDeliveryError,
+        );
+        auth.destroy();
+      }
+
+      expect(infoCalls).toEqual([]);
+      expect(errors).toHaveLength(providers.length);
+    } finally {
+      console.info = originalInfo;
+      console.error = originalError;
+    }
+  });
+
   it("writes committed credentials in the legacy-readable rolling-deploy format", async () => {
     const backend = new CapturingBackend();
     let text = "";

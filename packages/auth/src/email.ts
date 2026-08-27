@@ -366,7 +366,10 @@ function boundedReceiptText(value: unknown, maxLength: number): value is string 
   if (typeof value !== "string" || value.length === 0 || value.length > maxLength) return false;
   for (let index = 0; index < value.length; index += 1) {
     const code = value.charCodeAt(index);
-    if (code < 0x20 || code === 0x7f) return false;
+    // Receipt fields are emitted to operational logs. Restrict them to
+    // printable ASCII so Unicode line separators and bidi controls cannot
+    // forge or visually reorder the structured acceptance record.
+    if (code < 0x20 || code > 0x7e) return false;
   }
   return value.trim().length > 0;
 }
@@ -550,6 +553,10 @@ export class EmailAuth {
       if (!isValidDeliveryReceipt(receipt)) {
         throw new Error("email provider returned no acceptance receipt");
       }
+      console.info("[steward:auth] email provider accepted send", {
+        provider: receipt.provider,
+        messageId: receipt.id ?? null,
+      });
     } catch (err) {
       console.error("[steward:auth] email provider rejected send", redactedThrownDiagnostics(err));
       throw new EmailDeliveryError();
