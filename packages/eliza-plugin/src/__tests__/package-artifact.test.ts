@@ -46,13 +46,18 @@ afterAll(() => {
 });
 
 describe("published package artifact", () => {
-  test("contains only the manifest, changelog, and built distribution", () => {
+  test("contains only the manifest, readme, changelog, and built distribution", () => {
     expect(packedFiles).toContain("package.json");
+    expect(packedFiles).toContain("README.md");
     expect(packedFiles).toContain("CHANGELOG.md");
     expect(packedFiles.some((path) => path.startsWith("dist/"))).toBe(true);
     expect(
       packedFiles.every(
-        (path) => path === "package.json" || path === "CHANGELOG.md" || path.startsWith("dist/"),
+        (path) =>
+          path === "package.json" ||
+          path === "README.md" ||
+          path === "CHANGELOG.md" ||
+          path.startsWith("dist/"),
       ),
     ).toBe(true);
   });
