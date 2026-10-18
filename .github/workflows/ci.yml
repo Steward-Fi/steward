@@ -478,8 +478,9 @@ jobs:
     runs-on: ubuntu-latest
     # The serial API suite intentionally runs each PGLite-heavy file in a
     # separate process. Keep the job budget aligned with the documented
-    # 25-minute bound below; 15 minutes cancels healthy hosted runs mid-suite.
-    timeout-minutes: 25
+    # serial bound below (334 files, ~25 min of test time + ~4 min setup); 25
+    # minutes cancelled hosted runs at file ~304 of 334 (#925, #931).
+    timeout-minutes: 40
     env:
       REDIS_URL: "redis://localhost:6379"
 
@@ -616,7 +617,7 @@ jobs:
         # much). Keep this serial: even two PGLite processes can starve an API
         # request long enough to hit Bun's per-test timeout. The runner's
         # 120-second default leaves headroom for migration-heavy files while
-        # the 25-minute job timeout still bounds the complete suite.
+        # the 40-minute job timeout still bounds the complete suite.
         run: TEST_JOBS=1 TEST_TIMEOUT=120000 bun packages/api/scripts/run-tests-isolated.ts
         env:
           DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"

@@ -568,8 +568,9 @@ jobs:
     name: Integration Tests (Postgres)
     runs-on: ubuntu-latest
     # The serial isolated runner below keeps migration-heavy files from starving
-    # each other. Give the complete API suite enough bounded wall-clock headroom.
-    timeout-minutes: 25
+    # each other. Give the complete API suite enough bounded wall-clock headroom
+    # (334 files serially is ~25 min of test time on hosted runners, plus ~4 min setup).
+    timeout-minutes: 40
     env:
       REDIS_URL: "redis://localhost:6379"
 
