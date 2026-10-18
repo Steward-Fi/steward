@@ -32,6 +32,11 @@ export interface PhoneAuthConfig {
   tokenTtlMs?: number;
   tokenStore?: TokenStore;
   bodyTemplate?: string;
+  /**
+   * Runs before any provider call on every send. Throw to refuse the send
+   * (destination policy, deployment-wide budget). Never sees the code.
+   */
+  sendGuard?: (phone: string) => Promise<void>;
 }
 
 const DEFAULT_TTL_MS = 5 * 60 * 1000;
@@ -124,6 +129,7 @@ export class PhoneAuth {
   private managedOperationLockTtlMs: number;
   private managedReservationTtlMs: number;
   private bodyTemplate: string;
+  private sendGuard?: (phone: string) => Promise<void>;
 
   constructor(config: PhoneAuthConfig = {}) {
     if (config.provider && config.managedProvider) {
@@ -155,6 +161,7 @@ export class PhoneAuth {
     this.managedOperationLockTtlMs = config.managedProvider?.operationLockTtlMs ?? this.tokenTtlMs;
     this.managedReservationTtlMs = config.managedProvider?.reservationTtlMs ?? this.tokenTtlMs;
     this.bodyTemplate = config.bodyTemplate ?? DEFAULT_BODY;
+    this.sendGuard = config.sendGuard;
   }
 
   private managedOperationError(
@@ -309,6 +316,7 @@ export class PhoneAuth {
     if (!isValidE164(phone)) {
       throw new Error("phone must be E.164 (e.g. +14155551234)");
     }
+    await this.sendGuard?.(phone);
     if (this.managedProvider) {
       return this.withManagedOperation(phone, "send", async (lock, markProviderAttempted) => {
         // Purpose-bind before external delivery. The conservative reservation

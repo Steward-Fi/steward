@@ -39,6 +39,8 @@ import {
   platformAuthMiddleware,
   SmsChallengeInProgressError,
   SmsDeliveryError,
+  SmsDestinationNotAllowedError,
+  SmsSendBudgetExceededError,
   SmsVerificationError,
 } from "@stwd/auth";
 import { redactedThrownDiagnostics } from "@stwd/shared";
@@ -124,6 +126,15 @@ export function createApp(): Hono<{ Variables: AppVariables }> {
         },
         409,
       );
+    }
+
+    if (err instanceof SmsDestinationNotAllowedError) {
+      return c.json<ApiResponse>({ ok: false, error: err.message }, 400);
+    }
+
+    if (err instanceof SmsSendBudgetExceededError) {
+      c.header("Retry-After", String(err.retryAfterSecs));
+      return c.json<ApiResponse>({ ok: false, error: err.message }, 503);
     }
 
     if (err instanceof SmsDeliveryError) {

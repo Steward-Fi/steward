@@ -76,6 +76,7 @@ import {
   IdentityJwtConfigurationError,
   InMemoryRecoveryCodeStore,
   isBuiltInProvider,
+  isSmsDestinationAllowed,
   isValidE164,
   type MagicLinkTemplateData,
   type ManagedSmsOtpProvider,
@@ -94,12 +95,15 @@ import {
   renderCustomTemplate,
   revocationStore,
   SmsChallengeInProgressError,
+  SmsDestinationNotAllowedError,
   type SmsProvider,
+  SmsSendBudgetExceededError,
   SmsVerificationNotAttemptedError,
   type StoreBackend,
   type StoredRecoveryCode,
   signAccessToken,
   signIdentityJwtPayload,
+  smsSendGlobalMaxPerHour,
   type TelegramLoginPayload,
   TokenStore,
   TwilioSmsProvider,
@@ -544,45 +548,75 @@ export async function checkAuthRateLimit(
   const effectiveMax = resolved.coarse ? max * AUTH_RATE_LIMIT_FALLBACK_HEADROOM : max;
   const key = `ratelimit:auth:${endpoint}:${hashSha256Hex(resolved.subject)}:${windowMs}:${effectiveMax}`;
 
-  const deny = (retryAfterSecs: number) => {
-    const headers = formatRateLimitHeaders({
-      limit: effectiveMax,
-      remaining: 0,
-      resetMs: retryAfterSecs * 1000,
-      retryAfterMs: retryAfterSecs * 1000,
-    });
-    headers["RateLimit-Policy"] = `${effectiveMax};w=${Math.ceil(windowMs / 1000)}`;
-    for (const [name, value] of Object.entries(headers)) c.header(name, value);
-    return { allowed: false, retryAfterSecs };
-  };
+  const result = await consumeAuthRateLimit(endpoint, key, windowMs, effectiveMax, options);
+  if (result.allowed) return { allowed: true };
+  const headers = formatRateLimitHeaders({
+    limit: effectiveMax,
+    remaining: 0,
+    resetMs: result.retryAfterSecs * 1000,
+    retryAfterMs: result.retryAfterSecs * 1000,
+  });
+  headers["RateLimit-Policy"] = `${effectiveMax};w=${Math.ceil(windowMs / 1000)}`;
+  for (const [name, value] of Object.entries(headers)) c.header(name, value);
+  return { allowed: false, retryAfterSecs: result.retryAfterSecs };
+}
+
+/**
+ * One deployment-wide budget with no client subject, e.g. the SMS send
+ * ceiling that stops pumping traffic rotating IPs and destinations. Same
+ * backing store and outage semantics as checkAuthRateLimit; needs no request
+ * context.
+ */
+export async function checkGlobalAuthBudget(
+  endpoint: string,
+  windowMs: number,
+  max: number,
+): Promise<{ allowed: boolean; retryAfterSecs: number }> {
+  return consumeAuthRateLimit(
+    endpoint,
+    `ratelimit:auth:${endpoint}:global:${windowMs}:${max}`,
+    windowMs,
+    max,
+  );
+}
+
+async function consumeAuthRateLimit(
+  endpoint: string,
+  key: string,
+  windowMs: number,
+  max: number,
+  options: { strictDurable?: boolean } = {},
+): Promise<{ allowed: boolean; retryAfterSecs: number }> {
+  const allow = { allowed: true, retryAfterSecs: 0 };
+  const deny = (retryAfterSecs: number) => ({ allowed: false, retryAfterSecs });
 
   try {
     const redisMw = await import("../middleware/redis.js");
     const redisClient = redisMw.getRedisClient();
     if (!redisClient) {
       if (options.strictDurable) return deny(60);
-      if (allowAuthRateLimitSoftFail()) return { allowed: true };
+      if (allowAuthRateLimitSoftFail()) return allow;
       if (redisMw.isRedisConfigured() && authRateLimitOutageAllow(endpoint)) {
-        return { allowed: true };
+        return allow;
       }
       return deny(60);
     }
 
     const { checkRateLimit } = await import("@stwd/redis");
-    const result = await checkRateLimit(key, windowMs, effectiveMax, redisClient);
+    const result = await checkRateLimit(key, windowMs, max, redisClient);
     if (!result.allowed) {
       return deny(Math.ceil(result.resetMs / 1000));
     }
-    return { allowed: true };
+    return allow;
   } catch (err) {
     if (options.strictDurable) return deny(60);
-    if (allowAuthRateLimitSoftFail()) return { allowed: true };
+    if (allowAuthRateLimitSoftFail()) return allow;
     // Any step above can throw — the dynamic imports, the availability probe,
     // or checkRateLimit itself — so a throw is NOT proof Redis was seen
     // available. Treat it as an outage and let the bounded valve decide; the
     // deliberate hard deny for never-configured Redis in production is the
     // non-throwing isRedisAvailable() branch above, which returns instead.
-    if (authRateLimitOutageAllow(endpoint, err)) return { allowed: true };
+    if (authRateLimitOutageAllow(endpoint, err)) return allow;
     return deny(60);
   }
 }
@@ -2531,10 +2565,64 @@ async function findOrCreateWalletUserWithStatus(
   }
 }
 
-async function findOrCreatePhoneUserWithStatus(phone: string): Promise<UserProvisionResult> {
+/**
+ * The phone number's original account and its SMS/WhatsApp links name more
+ * than one user. No session is issued until an operator reconciles them.
+ */
+export class PhoneIdentityConflictError extends Error {
+  readonly code = "PHONE_IDENTITY_CONFLICT";
+  constructor() {
+    super("Phone login identity needs reconciliation");
+    this.name = "PhoneIdentityConflictError";
+  }
+}
+
+function phoneIdentityConflictResponse(c: Context): Response {
+  return c.json<ApiResponse & { code: string }>(
+    {
+      ok: false,
+      error: "Phone login identity needs reconciliation",
+      code: "PHONE_IDENTITY_CONFLICT",
+    },
+    409,
+  );
+}
+
+/**
+ * Resolve the user a verified phone signs in to. SMS and WhatsApp share one
+ * phone subject, so a link made through either channel (user.ts phone link)
+ * marks the number as owned: a linked number signs in to its linked account,
+ * and a number linked only through the other channel never gets a second,
+ * empty account. Every link and the original phone account must name one
+ * user, otherwise the login fails closed with PHONE_IDENTITY_CONFLICT.
+ *
+ * Ported from elizaOS/eliza packages/auth (f3b2358e267, 18ba2c685b6,
+ * f03edd03e81).
+ */
+async function findOrCreatePhoneUserWithStatus(
+  phone: string,
+  provider: "phone" | "whatsapp" = "phone",
+): Promise<UserProvisionResult> {
   const phoneSubject = `phone:${hashSha256Hex(phone)}`;
   const db = getDb();
+  const links = await db
+    .select({ provider: accounts.provider, user: users })
+    .from(accounts)
+    .innerJoin(users, eq(accounts.userId, users.id))
+    .where(
+      and(
+        inArray(accounts.provider, ["phone", "whatsapp"]),
+        eq(accounts.providerAccountId, phoneSubject),
+      ),
+    );
+  const linked = links.find((link) => link.provider === provider);
   const [existing] = await db.select().from(users).where(eq(users.walletAddress, phoneSubject));
+  const owners = new Set(links.map((link) => link.user.id));
+  if (existing) owners.add(existing.id);
+  if (owners.size > 1 || (!linked && !existing && links.length > 0)) {
+    throw new PhoneIdentityConflictError();
+  }
+  if (linked) return { user: linked.user, isNew: false };
   if (existing) return { user: existing, isNew: false };
 
   const [created] = await db
@@ -3067,10 +3155,46 @@ export function getPhoneAuth(): PhoneAuth {
     provider,
     managedProvider,
     tokenStore: new TokenStore({ backend: getMfaBackend() }),
+    sendGuard: guardSmsSend,
   });
   if (runtimeCache) runtimeCache.phoneAuth = phoneAuth;
   else _phoneAuth = phoneAuth;
   return phoneAuth;
+}
+
+type SmsSendBudgetCheck = (
+  endpoint: string,
+  windowMs: number,
+  max: number,
+) => Promise<{ allowed: boolean; retryAfterSecs: number }>;
+
+let smsSendBudgetCheckOverride: SmsSendBudgetCheck | undefined;
+
+/** Test seam: substitute the deployment-wide SMS budget store. */
+export function _setSmsSendBudgetCheckForTests(check: SmsSendBudgetCheck | undefined): void {
+  smsSendBudgetCheckOverride = check;
+}
+
+/**
+ * SMS pumping guard for every OTP send: a deployment-wide destination policy
+ * (default US + Canada) and a deployment-wide hourly ceiling. Per-IP and
+ * per-destination limits stay at the routes; pumping rotates both.
+ */
+async function guardSmsSend(phone: string): Promise<void> {
+  if (!isSmsDestinationAllowed(phone)) {
+    console.warn(`[SmsGuard] refused destination prefix ${phone.slice(0, 4)}`);
+    throw new SmsDestinationNotAllowedError();
+  }
+  const max = smsSendGlobalMaxPerHour();
+  if (max === 0) return;
+  const check = smsSendBudgetCheckOverride ?? checkGlobalAuthBudget;
+  const budget = await check("sms-send-global", 3_600_000, max);
+  if (!budget.allowed) {
+    console.error(
+      `[SmsGuard] ALERT: deployment-wide SMS budget of ${max}/hour is used up; OTP sends are refused until the window resets`,
+    );
+    throw new SmsSendBudgetExceededError(budget.retryAfterSecs);
+  }
 }
 
 function buildTwilioVerifyProviderFromEnvironment(
@@ -5961,7 +6085,14 @@ auth.post("/test/token", async (c) => {
 
   const methodResponse = await requireTenantLoginMethodAllowed(c, tenantId, "sms");
   if (methodResponse) return methodResponse;
-  const { user, isNew } = await findOrCreatePhoneUserWithStatus(testAccount.phone);
+  let provisioned: UserProvisionResult;
+  try {
+    provisioned = await findOrCreatePhoneUserWithStatus(testAccount.phone, "phone");
+  } catch (error) {
+    if (error instanceof PhoneIdentityConflictError) return phoneIdentityConflictResponse(c);
+    throw error;
+  }
+  const { user, isNew } = provisioned;
   await ensurePersonalTenant(user.id, `Phone ${testAccount.phone.slice(-4)}`);
   await ensureUserTenantLink(user.id, tenantId, "member");
   if (isNew) {
@@ -6123,7 +6254,14 @@ auth.post("/sms/verify", async (c) => {
   }
   await clearSmsVerifyFailures(body.phone, otpPurpose);
 
-  const { user, isNew } = await findOrCreatePhoneUserWithStatus(body.phone);
+  let provisioned: UserProvisionResult;
+  try {
+    provisioned = await findOrCreatePhoneUserWithStatus(body.phone, "phone");
+  } catch (error) {
+    if (error instanceof PhoneIdentityConflictError) return phoneIdentityConflictResponse(c);
+    throw error;
+  }
+  const { user, isNew } = provisioned;
   const tenantResult = await resolveAndValidateTenant(c, user.id, body.tenantId);
   if (!tenantResult.ok) {
     return c.json<ApiResponse>({ ok: false, error: tenantResult.error }, tenantResult.status);
@@ -6302,7 +6440,14 @@ auth.post("/whatsapp/verify", async (c) => {
   }
   await clearSmsVerifyFailures(body.phone, otpPurpose);
 
-  const { user, isNew } = await findOrCreatePhoneUserWithStatus(body.phone);
+  let provisioned: UserProvisionResult;
+  try {
+    provisioned = await findOrCreatePhoneUserWithStatus(body.phone, "whatsapp");
+  } catch (error) {
+    if (error instanceof PhoneIdentityConflictError) return phoneIdentityConflictResponse(c);
+    throw error;
+  }
+  const { user, isNew } = provisioned;
   const tenantResult = await resolveAndValidateTenant(c, user.id, body.tenantId);
   if (!tenantResult.ok) {
     return c.json<ApiResponse>({ ok: false, error: tenantResult.error }, tenantResult.status);
