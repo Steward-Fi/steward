@@ -86,6 +86,11 @@ export class PasskeyAuth {
     this.challenges = config.challengeStore ?? new ChallengeStore();
   }
 
+  /** Canonical relying-party ID used for every ceremony on this instance. */
+  get rpID(): string {
+    return this.config.rpID;
+  }
+
   // ── Registration ─────────────────────────────────────────────────────────
 
   /**

@@ -794,7 +794,7 @@ test("terminal approvals disable both decisions and errors do not enumerate priv
           ? `/dashboard/approvals/${ACTION_ID}`
           : `/dashboard/actions/${ACTION_ID}`,
       );
-      const alert = errorPage.getByRole("alert");
+      const alert = errorPage.locator("main").getByRole("alert");
       await expect(alert.getByText("Not found or not authorized")).toBeVisible();
       await expect(alert).not.toContainText(`PRIVATE_${status}`);
       renderedErrors.push((await alert.innerText()).replaceAll(/\s+/g, " ").trim());
@@ -815,7 +815,7 @@ test("non-auth provider failures preserve reachable API diagnostics", async ({ b
     caseErrorBody: { ok: false, error: "CASE_EXPORT_UNAVAILABLE" },
   });
   await page.goto(`/dashboard/actions/${ACTION_ID}`);
-  await expect(page.getByRole("alert")).toContainText("CASE_EXPORT_UNAVAILABLE");
+  await expect(page.locator("main").getByRole("alert")).toContainText("CASE_EXPORT_UNAVAILABLE");
 
   const approvalContext = await browser.newContext();
   const approvalPage = await approvalContext.newPage();

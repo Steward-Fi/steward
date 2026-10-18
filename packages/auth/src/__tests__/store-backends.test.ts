@@ -30,6 +30,12 @@ function redisLike(overrides: Partial<RedisLike> = {}): RedisLike {
     },
     eval: async (_script, keys, key, ...args) => {
       const all = [key, ...args].map(String);
+      if (keys === 1 && all.length === 2) {
+        const [compareKey, expected] = all;
+        if (store.get(compareKey) !== expected) return 0;
+        store.delete(compareKey);
+        return 1;
+      }
       if (all.length === keys * 6) {
         const publishKeys = all.slice(0, keys);
         const publishArgs = all.slice(keys);
@@ -312,6 +318,23 @@ describe("NamespacedStoreBackend", () => {
     backend.destroy();
   });
 
+  it("compare-deletes only an exact live generation and returns false on absence", async () => {
+    for (const backend of [new MemoryBackend(), new RedisBackend(redisLike(), "test:")]) {
+      const store = new NamespacedStoreBackend(backend, "operation-lock");
+      await store.set("phone", "owner-a", 60_000);
+
+      expect(await store.compareDelete("phone", "owner-b")).toBe(false);
+      expect(await store.get("phone")).toBe("owner-a");
+      expect(await store.compareDelete("phone", "owner-a")).toBe(true);
+      expect(await store.compareDelete("phone", "owner-a")).toBe(false);
+
+      await store.set("phone", "owner-new", 60_000);
+      expect(await store.compareDelete("phone", "owner-a")).toBe(false);
+      expect(await store.get("phone")).toBe("owner-new");
+      if (backend instanceof MemoryBackend) backend.destroy();
+    }
+  });
+
   it("isolates identical keys even when namespace boundaries are ambiguous", async () => {
     const backend = new MemoryBackend();
     const first = new NamespacedStoreBackend(backend, "wallet");
@@ -347,6 +370,7 @@ describe("NamespacedStoreBackend", () => {
       setIfNotExists: async () => true,
       get: async () => null,
       consume: async () => null,
+      compareDelete: async () => false,
       transition: async () => false,
       publish: async () => true,
       delete: async () => undefined,
@@ -368,6 +392,7 @@ describe("NamespacedStoreBackend", () => {
         consumeCalls += 1;
         throw new Error("durable backend unavailable");
       },
+      compareDelete: async () => false,
       transition: async () => false,
       publish: async () => true,
       delete: async () => undefined,

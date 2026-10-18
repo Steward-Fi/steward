@@ -29,7 +29,6 @@ import {
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { TradeSessionManager } from "@stwd/trade-sessions";
-import { Vault } from "@stwd/vault";
 import { PolymarketExecutionAdapter } from "@stwd/venue-polymarket";
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
@@ -45,7 +44,6 @@ const FUNDER = "0x0985cCC0fD7C568d493874D845471D5F4B1D9c3c";
 const WALLET = "0x1111111111111111111111111111111111111111";
 
 let submitSpy: ReturnType<typeof spyOn> | undefined;
-let getWalletSpy: ReturnType<typeof spyOn> | undefined;
 let buildSpy: ReturnType<typeof spyOn> | undefined;
 let fenceSpy: ReturnType<typeof spyOn> | undefined;
 let orderIdentitySpy: ReturnType<typeof spyOn> | undefined;
@@ -54,20 +52,17 @@ let createTradeRoutesForTest: typeof import("../routes/trade").createTradeRoutes
 // Inject a polymarket venue wallet WITH funder metadata so the creds resolver
 // gets past the wallet step. Whether the L2 credentials resolve is toggled
 // separately per test by mutating the metadata.
+let walletFixture: Awaited<ReturnType<StewardAppContext["vault"]["getWallet"]>> | Error | undefined;
+
 function stubWallet(withFunder: boolean) {
-  getWalletSpy = spyOn(Vault.prototype, "getWallet").mockImplementation((async (args: {
-    venue?: string;
-  }) => {
-    if (args.venue !== "polymarket") throw new Error("no wallet");
-    return {
-      agentId: "x",
-      chainFamily: "evm" as const,
-      venue: "polymarket",
-      purpose: null,
-      address: WALLET,
-      metadata: withFunder ? { funderAddress: FUNDER } : {},
-    };
-  }) as never);
+  walletFixture = {
+    agentId: "x",
+    chainFamily: "evm" as const,
+    venue: "polymarket",
+    purpose: null,
+    address: WALLET,
+    metadata: withFunder ? { funderAddress: FUNDER } : {},
+  } as Awaited<ReturnType<StewardAppContext["vault"]["getWallet"]>>;
 }
 
 async function seedSession(opts: {
@@ -202,6 +197,12 @@ beforeAll(async () => {
   createTradeRoutesForTest = createTradeRoutes;
   const { testCtx } = await import("./_ctx");
   sharedTestContext = testCtx();
+  const realGetWallet = sharedTestContext.vault.getWallet.bind(sharedTestContext.vault);
+  sharedTestContext.vault.getWallet = (async (...args: Parameters<typeof realGetWallet>) => {
+    if (walletFixture instanceof Error) throw walletFixture;
+    if (walletFixture) return walletFixture;
+    return realGetWallet(...args);
+  }) as typeof sharedTestContext.vault.getWallet;
   sharedTradeRoutes = createTradeRoutes(sharedTestContext);
 });
 
@@ -221,10 +222,9 @@ describe("POST /v1/trade/polymarket/order", () => {
 
   afterEach(() => {
     submitSpy?.mockRestore();
-    getWalletSpy?.mockRestore();
     buildSpy?.mockRestore();
     submitSpy = undefined;
-    getWalletSpy = undefined;
+    walletFixture = undefined;
     buildSpy = undefined;
   });
 
@@ -670,9 +670,7 @@ describe("POST /v1/trade/polymarket/order", () => {
   it("fails closed with 409 when the polymarket venue wallet is missing", async () => {
     const { tenantId, agentId, sessionId } = await seedSession({});
     // getWallet throws -> wallet-not-found.
-    getWalletSpy = spyOn(Vault.prototype, "getWallet").mockImplementation((async () => {
-      throw new Error("no wallet");
-    }) as never);
+    walletFixture = new Error("no wallet");
     const app = makeApp(tenantId, agentId, tradeRoutes);
 
     const res = await postOrder(app, sessionId, crypto.randomUUID());
@@ -1222,8 +1220,7 @@ describe("POST /v1/trade/sessions (polymarket)", () => {
   });
 
   afterEach(() => {
-    getWalletSpy?.mockRestore();
-    getWalletSpy = undefined;
+    walletFixture = undefined;
   });
 
   async function seedAgent(): Promise<{ tenantId: string; agentId: string }> {
@@ -1238,6 +1235,13 @@ describe("POST /v1/trade/sessions (polymarket)", () => {
       tenantId,
       name: "PM Sess Agent",
       walletAddress: "0x0000000000000000000000000000000000000001",
+    });
+    await getDb().insert(agentWallets).values({
+      agentId,
+      chainFamily: "evm",
+      address: WALLET,
+      venue: "polymarket",
+      purpose: "prediction-market",
     });
     return { tenantId, agentId };
   }

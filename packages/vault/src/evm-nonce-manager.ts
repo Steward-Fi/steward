@@ -43,6 +43,7 @@ export async function allocateEvmNonce(input: {
   walletAddress: Address;
   chainId: number;
   getPendingNonce: PendingNonceReader;
+  db?: ReturnType<typeof getDb>;
 }): Promise<number> {
   const walletAddress = input.walletAddress.toLowerCase() as Address;
   const lockKey = `${input.chainId}:${walletAddress}`;
@@ -53,7 +54,7 @@ export async function allocateEvmNonce(input: {
       throw new Error("RPC returned an invalid pending nonce");
     }
 
-    return getDb().transaction(async (tx) => {
+    return (input.db ?? getDb()).transaction(async (tx) => {
       if (usesAdvisoryLock()) {
         await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`evm-nonce:${lockKey}`}))`);
       }
@@ -186,12 +187,13 @@ export async function markEvmNonceDropped(input: {
   walletAddress: Address;
   chainId: number;
   nonce: number;
+  db?: ReturnType<typeof getDb>;
 }): Promise<void> {
   const walletAddress = input.walletAddress.toLowerCase() as Address;
   const lockKey = `${input.chainId}:${walletAddress}`;
 
   await withNonceLock(lockKey, async () => {
-    await getDb().transaction(async (tx) => {
+    await (input.db ?? getDb()).transaction(async (tx) => {
       if (usesAdvisoryLock()) {
         await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`evm-nonce:${lockKey}`}))`);
       }
@@ -219,12 +221,13 @@ export async function confirmEvmNonce(input: {
   walletAddress: Address;
   chainId: number;
   nonce: number;
+  db?: ReturnType<typeof getDb>;
 }): Promise<void> {
   const walletAddress = input.walletAddress.toLowerCase() as Address;
   const lockKey = `${input.chainId}:${walletAddress}`;
 
   await withNonceLock(lockKey, async () => {
-    await getDb().transaction(async (tx) => {
+    await (input.db ?? getDb()).transaction(async (tx) => {
       if (usesAdvisoryLock()) {
         await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`evm-nonce:${lockKey}`}))`);
       }

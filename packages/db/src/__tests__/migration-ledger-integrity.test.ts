@@ -71,6 +71,10 @@ describe("core migration ledger integrity", () => {
     expect(source).toContain('name: "capability_rate_limit_bucket_agent_fence()"');
     expect(source).toContain('name: "capability_rate_limit_bucket_agent_fence"');
     expect(source).toContain('tag: "0005_activated_rls_inheritance"');
+    expect(source).toContain('tag: "0006_maintenance_policy_reconciliation"');
+    expect(source).toContain('roles: "relation_owner"');
+    expect(source).toContain("policy.polpermissive = expected.policy_permissive");
+    expect(source).toContain("policy.polroles = ARRAY[0::oid]");
     expect(source).toContain("schema does not match its applied migration prefix");
   });
 
@@ -80,14 +84,25 @@ describe("core migration ledger integrity", () => {
     expect(createHash("sha256").update(shippedPolicy).digest("hex")).toBe(
       "0d45006776d6c932d36eeec87811b98b24e3d1fb388af6aafd8109b70ae1bc2b",
     );
+    const shippedInheritance = readFileSync(
+      new URL("0005_activated_rls_inheritance.sql", pluginMigrations),
+    );
+    expect(createHash("sha256").update(shippedInheritance).digest("hex")).toBe(
+      "ea0288cd9de6ca8413dd8cfaea518b24df24c0012ce4720edb5f94e285c15e79",
+    );
     const pluginJournal = JSON.parse(
       readFileSync(new URL("meta/_journal.json", pluginMigrations), "utf8"),
     ) as { entries: JournalEntry[] };
-    expect(pluginJournal.entries.at(-2)?.tag).toBe("0004_capability_rate_limit_buckets");
-    expect(pluginJournal.entries.at(-1)).toMatchObject({
+    expect(pluginJournal.entries.at(-3)?.tag).toBe("0004_capability_rate_limit_buckets");
+    expect(pluginJournal.entries.at(-2)).toMatchObject({
       idx: 5,
       tag: "0005_activated_rls_inheritance",
       when: 1787250000001,
+    });
+    expect(pluginJournal.entries.at(-1)).toMatchObject({
+      idx: 6,
+      tag: "0006_maintenance_policy_reconciliation",
+      when: 1787439000001,
     });
   });
 

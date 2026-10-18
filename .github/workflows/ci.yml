@@ -169,7 +169,7 @@ jobs:
           if [ "${{ matrix.package }}" = "packages/sdk" ]; then
             mapfile -t sdk_tests < <(find packages/sdk/src -type f \( -name '*.test.ts' -o -name '*.spec.ts' \) | sort)
             bun test --isolate "${sdk_tests[@]}"
-          elif [ "${{ matrix.package }}" = "packages/plugin-sdk" ] || [ "${{ matrix.package }}" = "packages/plugin-example" ] || [ "${{ matrix.package }}" = "packages/plugin-capabilities" ]; then
+          elif [ "${{ matrix.package }}" = "packages/proxy" ] || [ "${{ matrix.package }}" = "packages/plugin-sdk" ] || [ "${{ matrix.package }}" = "packages/plugin-example" ] || [ "${{ matrix.package }}" = "packages/plugin-capabilities" ]; then
             # These packages own their test-process isolation or package-local
             # preload. Running them from the repository root bypasses that
             # contract and can leak mutable fixtures between files.
@@ -178,6 +178,16 @@ jobs:
             # PGLite migrations can exceed Bun's 5s default on hosted runners.
             # Keep file isolation while honoring the package's 30s test budget.
             bun test --isolate --timeout 30000 packages/trade-sessions
+          elif [ "${{ matrix.package }}" = "packages/vault" ]; then
+            # Vault's isolated PGLite suites include KMS/external-custody cases
+            # that can exceed Bun's 5s default on hosted runners under load.
+            # Keep file isolation while allowing the suite's existing work to
+            # complete instead of reporting a spurious hook timeout.
+            bun test --isolate --timeout 300000 packages/vault
+          elif [ "${{ matrix.package }}" = "scripts/__tests__" ]; then
+            # Railway release tests exercise bounded child-process cleanup and
+            # can cross Bun's 5s per-test default on loaded hosted runners.
+            bun test --isolate --timeout 30000 scripts/__tests__
           else
             bun test --isolate ${{ matrix.package }}
           fi
@@ -468,14 +478,18 @@ jobs:
     runs-on: ubuntu-latest
     # The serial API suite intentionally runs each PGLite-heavy file in a
     # separate process. Keep the job budget aligned with the documented
-    # 25-minute bound below; 15 minutes cancels healthy hosted runs mid-suite.
-    timeout-minutes: 25
+    # serial bound below (334 files, ~25 min of test time + ~4 min setup); 25
+    # minutes cancelled hosted runs at file ~304 of 334 (#925, #931).
+    timeout-minutes: 40
     env:
       REDIS_URL: "redis://localhost:6379"
 
     services:
       postgres:
-        image: postgres:16-alpine
+        # Production core-repair catalogs are PostgreSQL-major/minor sensitive.
+        # Keep this required lane on the exact production release used to
+        # generate and rehearse the checked-in manifest.
+        image: postgres:18.4-alpine
         env:
           POSTGRES_USER: steward
           POSTGRES_PASSWORD: steward_ci
@@ -483,7 +497,7 @@ jobs:
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U steward"
+          --health-cmd "pg_isready -U steward -d steward_test"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
@@ -512,6 +526,14 @@ jobs:
         env:
           DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"
 
+      - name: Steward release repair and readiness proof (Postgres 18.4)
+        run: >-
+          bun test
+          ./packages/db/src/__tests__/steward-core-repair.test.ts
+          ./packages/db/src/__tests__/steward-schema-migrations.test.ts
+        env:
+          DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"
+
       - name: Builder perps migration reconciliation proof (real Postgres)
         run: bun test ./packages/db/src/__tests__/agent-policy-builder-perps-reconcile-migration.test.ts
         env:
@@ -522,8 +544,11 @@ jobs:
         env:
           DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"
 
-      - name: Email challenge publication race proof (real Postgres)
-        run: bun test ./packages/auth/src/__tests__/email-postgres-publish.integration.test.ts
+      - name: Auth store race proofs (real Postgres)
+        run: >-
+          bun test
+          ./packages/auth/src/__tests__/email-postgres-publish.integration.test.ts
+          ./packages/auth/src/__tests__/store-backends-postgres-compare-delete.integration.test.ts
         env:
           DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"
 
@@ -592,7 +617,7 @@ jobs:
         # much). Keep this serial: even two PGLite processes can starve an API
         # request long enough to hit Bun's per-test timeout. The runner's
         # 120-second default leaves headroom for migration-heavy files while
-        # the 25-minute job timeout still bounds the complete suite.
+        # the 40-minute job timeout still bounds the complete suite.
         run: TEST_JOBS=1 TEST_TIMEOUT=120000 bun packages/api/scripts/run-tests-isolated.ts
         env:
           DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"

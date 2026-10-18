@@ -259,7 +259,7 @@ describe("signSolanaTransaction compute budget", () => {
       computeBudget: {},
     });
 
-    const tx = decodeSignedTx(result);
+    const tx = decodeSignedTx(result.result);
     const cb = readComputeBudget(tx);
     expect(cb.computeBudgetCount).toBe(2);
     // limit = ceil(450 × 1.2) = 540; price = 2000 (single recent fee).
@@ -285,7 +285,7 @@ describe("signSolanaTransaction compute budget", () => {
       broadcast: false,
       computeBudget: true,
     });
-    expect(readComputeBudget(decodeSignedTx(result)).computeBudgetCount).toBe(2);
+    expect(readComputeBudget(decodeSignedTx(result.result)).computeBudgetCount).toBe(2);
   });
 
   it("omitting computeBudget preserves the legacy single-instruction transfer (no fee RPCs)", async () => {
@@ -297,7 +297,7 @@ describe("signSolanaTransaction compute budget", () => {
       broadcast: false,
     });
 
-    const tx = decodeSignedTx(result);
+    const tx = decodeSignedTx(result.result);
     expect(tx.instructions).toHaveLength(1);
     expect(readComputeBudget(tx).computeBudgetCount).toBe(0);
     // Estimation seams are never touched on the legacy path.
@@ -313,7 +313,7 @@ describe("signSolanaTransaction compute budget", () => {
       broadcast: false,
       computeBudget: false,
     });
-    expect(decodeSignedTx(result).instructions).toHaveLength(1);
+    expect(decodeSignedTx(result.result).instructions).toHaveLength(1);
     expect(sim).not.toHaveBeenCalled();
   });
 });

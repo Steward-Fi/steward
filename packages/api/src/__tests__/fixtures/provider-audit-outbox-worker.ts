@@ -1,13 +1,32 @@
 import { closeDb, createDb } from "@stwd/db";
-import { providerActionService } from "../../services/provider-action-service";
+import {
+  __setProviderAuditOutboxAfterClaimForTests,
+  providerActionService,
+} from "../../services/provider-action-service";
 
 const databaseUrl = process.env.DATABASE_URL;
 const tenantId = process.env.TEST_TENANT_ID;
 const intentId = process.env.TEST_INTENT_ID;
-const gateKey = Number(process.env.TEST_GATE_KEY);
+const mode = process.env.TEST_WORKER_MODE ?? "race";
 
-if (!databaseUrl || !tenantId || !intentId || !Number.isSafeInteger(gateKey)) {
+if (!databaseUrl || !tenantId || !intentId) {
   throw new Error("missing provider audit-outbox worker configuration");
+}
+
+if (mode === "crash-after-claim") {
+  __setProviderAuditOutboxAfterClaimForTests(async (_claimToken, rowIds) => {
+    if (rowIds.length === 0) throw new Error("crash worker did not claim an outbox row");
+    // Deliberately bypass every finally/compensation path. The parent verifies
+    // that this committed lease survives process death and is safely reclaimed.
+    process.exit(86);
+  });
+  await providerActionService.recoverRequiredAuditOutbox(tenantId, intentId);
+  throw new Error("crash-after-claim worker unexpectedly survived");
+}
+
+const gateKey = Number(process.env.TEST_GATE_KEY);
+if (!Number.isSafeInteger(gateKey)) {
+  throw new Error("missing provider audit-outbox race gate configuration");
 }
 
 // A parent-held exclusive advisory lock keeps both child processes poised at

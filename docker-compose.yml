@@ -41,7 +41,7 @@ services:
 
   steward-rls-bootstrap:
     image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
-    entrypoint: ["psql"]
+    entrypoint: ["/scripts/postgres/psql-from-env.sh"]
     command:
       - "--no-psqlrc"
       - "-v"
@@ -70,7 +70,7 @@ services:
 
   steward-rls-prepare-0113:
     image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
-    entrypoint: ["psql"]
+    entrypoint: ["/scripts/postgres/psql-from-env.sh"]
     command: ["--no-psqlrc", "-v", "steward_migration_role=steward_migrator", "-v", "steward_bootstrap_role=steward_bootstrap_owner", "-f", "/scripts/postgres/rls-prepare-personal-lifecycle.sql"]
     restart: "no"
     environment:
@@ -96,7 +96,7 @@ services:
 
   steward-rls-upgrade-pre:
     image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
-    entrypoint: ["psql"]
+    entrypoint: ["/scripts/postgres/psql-from-env.sh"]
     command: ["--no-psqlrc", "-v", "steward_app_role=steward_app", "-v", "steward_migration_role=steward_migrator", "-v", "steward_bootstrap_role=steward_bootstrap_owner", "-f", "/scripts/postgres/rls-upgrade-personal-lifecycle.sql"]
     restart: "no"
     environment:
@@ -142,6 +142,10 @@ services:
       MIGRATION_DATABASE_URL: "${MIGRATION_DATABASE_URL:?MIGRATION_DATABASE_URL must be set}"
       STEWARD_PLUGINS: "${STEWARD_PLUGINS:-}"
       STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:-}"
+      # The composition module builds the same vault-aware context as runtime
+      # when schema-owning plugins are enabled, and validates this boundary at
+      # import even for a lean deployment.
+      STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?STEWARD_MASTER_PASSWORD must be set}"
     depends_on:
       steward-core-migrate-final:
         condition: service_completed_successfully
@@ -149,7 +153,7 @@ services:
 
   steward-rls-activate:
     image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
-    entrypoint: ["psql"]
+    entrypoint: ["/scripts/postgres/psql-from-env.sh"]
     command:
       - "--no-psqlrc"
       - "-v"
@@ -164,7 +168,7 @@ services:
       - "/scripts/postgres/rls-activate.sql"
     restart: "no"
     environment:
-      PGDATABASE: "${STEWARD_ADMIN_DATABASE_URL:?STEWARD_ADMIN_DATABASE_URL must be set}"
+      PGDATABASE: "${MIGRATION_DATABASE_URL:?MIGRATION_DATABASE_URL must be set}"
     volumes:
       - ./scripts/postgres:/scripts/postgres:ro
     depends_on:

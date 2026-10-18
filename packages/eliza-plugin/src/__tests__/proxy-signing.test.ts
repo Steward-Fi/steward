@@ -10,6 +10,7 @@ import type { StewardPluginConfig } from "../types.js";
 const SIGNING_SECRET = "eliza-plugin-proxy-signing-secret-with-enough-bytes";
 const JWT_SECRET = "eliza-plugin-proxy-jwt-secret-with-enough-bytes";
 const PROXY_URL = "https://proxy.eliza-plugin.test";
+const PGLITE_SETUP_TIMEOUT_MS = 30_000;
 const PROXY_TEST_ENV_KEYS = [
   "STEWARD_PGLITE_MEMORY",
   "STEWARD_JWT_SECRET",
@@ -75,7 +76,7 @@ beforeAll(async () => {
     lastProxyRequest = new Request(url, init);
     return proxyApp.request(path, init as RequestInit);
   }) as typeof fetch;
-});
+}, PGLITE_SETUP_TIMEOUT_MS);
 
 afterAll(async () => {
   globalThis.fetch = realFetch;

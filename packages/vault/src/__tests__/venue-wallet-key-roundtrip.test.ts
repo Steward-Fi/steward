@@ -114,6 +114,52 @@ describe("provisionVenueWallet key round-trip (AAD context regression)", () => {
         });
         expect(signature).toMatch(/^0x[0-9a-f]{130}$/i);
 
+        const transaction = {
+          agentId: "agent1",
+          tenantId: TENANT_ID,
+          to: "0x1111111111111111111111111111111111111111",
+          value: "1",
+          chainId: 8453,
+          nonce: 0,
+          gasLimit: "21000",
+          venue,
+          broadcast: false,
+        };
+        let rpcCalls = 0;
+        const originalFetch = globalThis.fetch;
+        globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+          rpcCalls += 1;
+          const body = JSON.parse(String(init?.body)) as { id: number; method: string };
+          if (body.method === "eth_chainId") {
+            return Response.json({ jsonrpc: "2.0", id: body.id, result: "0x2105" });
+          }
+          if (body.method === "eth_gasPrice") {
+            return Response.json({ jsonrpc: "2.0", id: body.id, result: "0x3b9aca00" });
+          }
+          throw new Error(`Unexpected JSON-RPC method: ${body.method}`);
+        }) as typeof fetch;
+        try {
+          await expect(vault.signTransaction(transaction)).rejects.toThrow(
+            "Hyperliquid transaction signing requires an authorized wallet assertion",
+          );
+          await expect(
+            vault.signTransaction({
+              ...transaction,
+              walletAddress: "0x2222222222222222222222222222222222222222",
+            }),
+          ).rejects.toThrow("Transaction signer no longer matches the authorized wallet");
+          expect(rpcCalls).toBe(0);
+
+          const signedTransaction = await vault.signTransaction({
+            ...transaction,
+            walletAddress: walletRow!.address,
+          });
+          expect(signedTransaction).toMatch(/^0x[0-9a-f]+$/i);
+          expect(rpcCalls).toBeGreaterThan(0);
+        } finally {
+          globalThis.fetch = originalFetch;
+        }
+
         await expect(vault.signTypedData(typedData)).rejects.toThrow(
           "Hyperliquid typed-data signing requires an authorized wallet assertion",
         );

@@ -33,7 +33,10 @@ type ImportCrypto = Pick<Crypto, "getRandomValues" | "subtle">;
 const textEncoder = new TextEncoder();
 
 function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
-  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+  // Materialize an owned, non-shared buffer. Ambient runtime typings can expose
+  // Uint8Array<ArrayBufferLike>, while WebCrypto requires an ArrayBuffer-backed
+  // BufferSource and must not receive SharedArrayBuffer input.
+  return bytes.slice().buffer;
 }
 
 function isCryptoKeyPair(value: CryptoKey | CryptoKeyPair): value is CryptoKeyPair {
@@ -131,7 +134,7 @@ export async function createEncryptedUserWalletKeyImportEnvelope(
         tagLength: 128,
       },
       aesKey,
-      plaintext,
+      toArrayBuffer(plaintext),
     ),
   );
   plaintext.fill(0);

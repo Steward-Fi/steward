@@ -118,7 +118,7 @@ import {
 } from "../services/gas-sponsorship";
 import { plaintextKeyExportResponseGateError } from "../services/key-export-plaintext-gate";
 import { isRecentMfaTimestamp } from "../services/recent-mfa";
-import { lockUserSession } from "../services/session-lock";
+import { lockPlatformUserAccount, lockUserSession } from "../services/session-lock";
 import { createSignerCredentialHash, verifySignerCredential } from "../services/signer-credentials";
 import { getConfiguredVault } from "../services/vault-factory";
 import { redactWalletMetadataSecrets } from "../services/wallet-metadata";
@@ -134,6 +134,7 @@ import {
   getEmailAuthForTenant,
   getImportSessionBackend,
   getPhoneAuth,
+  releaseUnattemptedSmsVerifyClaim,
 } from "./auth";
 
 // ─── Session payload types ────────────────────────────────────────────────────
@@ -1000,7 +1001,7 @@ function slugifyTenantId(value: string): string {
 }
 
 function userTenantCreationAllowed(): boolean {
-  return process.env.ALLOW_USER_TENANT_CREATION === "true";
+  return runtimeEnvironmentValue("ALLOW_USER_TENANT_CREATION") === "true";
 }
 
 async function writeUserAudit(
@@ -1668,7 +1669,10 @@ function userWalletRowsToAccountWallets(
 }
 
 async function withAgentSpendLock<T>(agentId: string, fn: () => Promise<T>): Promise<T> {
-  if (process.env.STEWARD_DB_MODE === "pglite" || process.env.STEWARD_PGLITE_MEMORY === "true") {
+  if (
+    runtimeEnvironmentValue("STEWARD_DB_MODE") === "pglite" ||
+    runtimeEnvironmentValue("STEWARD_PGLITE_MEMORY") === "true"
+  ) {
     return fn();
   }
   const db = getDb();
@@ -3240,7 +3244,7 @@ for (const channel of ["sms", "whatsapp"] as const) {
   user.post(`/me/accounts/phone/${channel}/send`, async (c) => {
     const personalSessionResponse = requirePersonalUserSession(c);
     if (personalSessionResponse) return personalSessionResponse;
-    if (channel === "whatsapp" && process.env.WHATSAPP_OTP_ENABLED !== "true") {
+    if (channel === "whatsapp" && runtimeEnvironmentValue("WHATSAPP_OTP_ENABLED") !== "true") {
       return c.json<ApiResponse>({ ok: false, error: "WhatsApp OTP is not configured" }, 503);
     }
     const session = c.get("userSession");
@@ -3259,7 +3263,11 @@ for (const channel of ["sms", "whatsapp"] as const) {
     const userId = c.get("userId");
     let expiresAt: Date;
     try {
-      ({ expiresAt } = await getPhoneAuth().sendOtp(body.phone, phoneLinkPurpose(channel, userId)));
+      ({ expiresAt } = await getPhoneAuth().sendOtp(
+        body.phone,
+        phoneLinkPurpose(channel, userId),
+        channel,
+      ));
     } catch (err) {
       if (err instanceof Error && err.message === "SMS provider not configured") {
         return c.json<ApiResponse>(
@@ -3285,7 +3293,7 @@ for (const channel of ["sms", "whatsapp"] as const) {
   user.post(`/me/accounts/phone/${channel}/verify`, async (c) => {
     const personalSessionResponse = requirePersonalUserSession(c);
     if (personalSessionResponse) return personalSessionResponse;
-    if (channel === "whatsapp" && process.env.WHATSAPP_OTP_ENABLED !== "true") {
+    if (channel === "whatsapp" && runtimeEnvironmentValue("WHATSAPP_OTP_ENABLED") !== "true") {
       return c.json<ApiResponse>({ ok: false, error: "WhatsApp OTP is not configured" }, 503);
     }
     const session = c.get("userSession");
@@ -3306,7 +3314,8 @@ for (const channel of ["sms", "whatsapp"] as const) {
 
     const userId = c.get("userId");
     const linkPurpose = phoneLinkPurpose(channel, userId);
-    if (!(await claimSmsVerifyAttempt(body.phone, linkPurpose))) {
+    const attemptClaim = await claimSmsVerifyAttempt(body.phone, linkPurpose);
+    if (!attemptClaim) {
       return c.json<ApiResponse>(
         {
           ok: false,
@@ -3316,7 +3325,13 @@ for (const channel of ["sms", "whatsapp"] as const) {
       );
     }
 
-    const verified = await getPhoneAuth().verifyOtp(body.phone, body.code, linkPurpose);
+    let verified: Awaited<ReturnType<ReturnType<typeof getPhoneAuth>["verifyOtp"]>>;
+    try {
+      verified = await getPhoneAuth().verifyOtp(body.phone, body.code, linkPurpose);
+    } catch (error) {
+      await releaseUnattemptedSmsVerifyClaim(attemptClaim, error);
+      throw error;
+    }
     if (!verified.valid) {
       return c.json<ApiResponse>({ ok: false, error: "Invalid or expired code" }, 401);
     }
@@ -3411,7 +3426,7 @@ user.post("/me/accounts/telegram/challenge", async (c) => {
     );
   }
 
-  const botToken = process.env.TELEGRAM_BOT_TOKEN?.trim();
+  const botToken = runtimeEnvironmentValue("TELEGRAM_BOT_TOKEN")?.trim();
   if (!botToken) {
     return c.json<ApiResponse>({ ok: false, error: "Telegram login is not configured" }, 503);
   }
@@ -3438,7 +3453,7 @@ user.post("/me/accounts/telegram", async (c) => {
     );
   }
 
-  const botToken = process.env.TELEGRAM_BOT_TOKEN?.trim();
+  const botToken = runtimeEnvironmentValue("TELEGRAM_BOT_TOKEN")?.trim();
   if (!botToken) {
     return c.json<ApiResponse>({ ok: false, error: "Telegram login is not configured" }, 503);
   }
@@ -3536,7 +3551,7 @@ user.post("/me/accounts/farcaster/nonce", async (c) => {
       403,
     );
   }
-  if (process.env.FARCASTER_LOGIN_ENABLED !== "true") {
+  if (runtimeEnvironmentValue("FARCASTER_LOGIN_ENABLED") !== "true") {
     return c.json<ApiResponse>({ ok: false, error: "Farcaster login is not configured" }, 503);
   }
 
@@ -3565,7 +3580,7 @@ user.post("/me/accounts/farcaster", async (c) => {
     );
   }
 
-  if (process.env.FARCASTER_LOGIN_ENABLED !== "true") {
+  if (runtimeEnvironmentValue("FARCASTER_LOGIN_ENABLED") !== "true") {
     return c.json<ApiResponse>({ ok: false, error: "Farcaster login is not configured" }, 503);
   }
   const body = await safeJsonParse<Parameters<typeof verifyFarcasterLogin>[0]>(c);
@@ -7861,6 +7876,8 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/role", async (c) => {
   try {
     updated = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
       const tx = txRaw as typeof db;
+      await lockPlatformUserAccount(tx, targetUserId);
+      await lockUserSession(tx, targetUserId);
       const lockedRequesterRole = await requireLockedTenantAdmin(tx, tenantId, requesterId);
       if (nextRole === "owner" && lockedRequesterRole !== "owner") {
         throw new Error("Only owners can grant owner role");
@@ -8079,8 +8096,9 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/deactivate", async (c) => 
     tenantId,
     async (txRaw, appendRequiredAudit) => {
       const tx = txRaw as typeof db;
-      await lockTenantOwnerLifecycle(tx, tenantId);
+      await lockPlatformUserAccount(tx, targetUserId);
       await lockUserSession(tx, targetUserId);
+      await lockTenantOwnerLifecycle(tx, tenantId);
       await requireLockedTenantAdmin(tx, tenantId, admin.userId);
       const [membership] = await tx
         .select({ role: userTenants.role })
@@ -8213,6 +8231,8 @@ user.delete("/me/tenants/:tenantId/users/:targetUserId", async (c) => {
   let member: { role: string } | null = null;
   try {
     member = await db.transaction(async (tx) => {
+      await lockPlatformUserAccount(tx, targetUserId);
+      await lockUserSession(tx, targetUserId);
       await lockTenantOwnerLifecycle(tx, tenantId);
       const [current] = await tx
         .select({ role: userTenants.role })
@@ -8265,8 +8285,9 @@ user.delete("/me/tenants/:tenantId/users/:targetUserId", async (c) => {
   try {
     deleted = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
       const tx = txRaw as typeof db;
-      await lockTenantOwnerLifecycle(tx, tenantId);
+      await lockPlatformUserAccount(tx, targetUserId);
       await lockUserSession(tx, targetUserId);
+      await lockTenantOwnerLifecycle(tx, tenantId);
       await requireLockedTenantAdmin(tx, tenantId, admin.userId);
       const [current] = await tx
         .select({
@@ -8760,8 +8781,9 @@ user.delete("/me/tenants/:tenantId/leave", async (c) => {
       tenantId,
       async (txRaw, appendRequiredAudit) => {
         const tx = txRaw as typeof db;
-        await lockTenantOwnerLifecycle(tx, tenantId);
+        await lockPlatformUserAccount(tx, userId);
         await lockUserSession(tx, userId);
+        await lockTenantOwnerLifecycle(tx, tenantId);
         const [membership] = await tx
           .select({ role: userTenants.role })
           .from(userTenants)

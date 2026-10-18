@@ -225,11 +225,12 @@ describe("StewardAuth.addPasskey with emailGrant (signed-out first-time signup)"
     expect(result.user?.email).toBe("new@user.test");
   });
 
-  it("omits emailGrant when none is supplied (session-based add-passkey)", async () => {
+  it("rejects a signed-out add-passkey when no emailGrant is supplied", async () => {
     const auth = new StewardAuth({ baseUrl: "https://api.example.test" });
-    await auth.addPasskey("existing@user.test");
-    expect(captured[0]?.body?.emailGrant).toBeUndefined();
-    expect(captured[1]?.body?.emailGrant).toBeUndefined();
+    await expect(auth.addPasskey("existing@user.test")).rejects.toThrow(
+      "Not authenticated. Sign in first or provide a verified-email grant.",
+    );
+    expect(captured).toEqual([]);
   });
 });
 

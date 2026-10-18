@@ -88,13 +88,15 @@ beforeAll(async () => {
       {
         id: TENANT_NO_KEY_ID,
         name: "Agent Token Expiry No Key Tenant",
-        apiKeyHash: "",
+        // The request below omits the API key; the stored value only needs to
+        // be non-matching. Keep it unique so this fixture cannot occupy the
+        // empty hash reserved by the default-tenant bootstrap.
+        apiKeyHash: "not-a-real-key-hash-no-key-tenant",
       },
       {
         id: OTHER_TENANT_ID,
         name: "Agent Token Expiry Other Tenant",
-        // api_key_hash has a unique index; a second "" row would be silently
-        // dropped by onConflictDoNothing and break the agents FK below.
+        // api_key_hash has a unique index; keep every fixture value distinct.
         apiKeyHash: "not-a-real-key-hash-other-tenant",
       },
     ])

@@ -14,12 +14,14 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it, mock, setDefaultTimeout } from "bun:test";
+import { createHash } from "node:crypto";
 import { agents, agentWallets, closeDb, getDb, policies as policiesTable, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { Hono } from "hono";
 import { z } from "zod";
 
 const PLATFORM_KEY = "stw_platform_test_operator_key";
+const PLATFORM_KEY_HASH = createHash("sha256").update(PLATFORM_KEY).digest("hex");
 setDefaultTimeout(30_000);
 
 // ── Mock the Hyperliquid adapter (no signing / no network) ─────────────────────
@@ -151,6 +153,7 @@ async function buildApp(ctxOverrides: Record<string, unknown> = {}) {
     const tenantId = c.req.header("X-Steward-Tenant") || "default";
     c.set("tenantId", tenantId);
     c.set("authType", "platform");
+    c.set("platformKeyHash", PLATFORM_KEY_HASH);
     return next();
   });
   app.route("/v1/trade", createOperatorRecoveryRoutes({ ...testCtx(), ...ctxOverrides }));

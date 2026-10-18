@@ -512,6 +512,11 @@ export function setPGLiteOverride(
   pgliteOverride = { db, close };
 }
 
+/** Whether getDb() is currently backed by the embedded PGLite override. */
+export function hasPGLiteOverride(): boolean {
+  return pgliteOverride !== undefined;
+}
+
 // ─── Request-scoped database propagation ────────────────────────────────────
 
 type RequestDatabase = ReturnType<typeof createDb>["db"];
@@ -760,8 +765,8 @@ export async function withTenantTransactionDatabase<T>(
 
 /**
  * Defer a side effect until the owner of the active tenant transaction has
- * observed a successful outer commit. Returns false when there is no commit
- * owner so callers can perform the side effect immediately.
+ * observed a successful outer commit. Returns false when no commit owner is
+ * present so callers can perform the side effect immediately.
  */
 export function afterTenantTransactionCommit(task: () => void | Promise<void>): boolean {
   const context = tenantTransactionDatabaseStorage.getStore();

@@ -1,24 +1,56 @@
 import { expect, type Page, type Route, test } from "@playwright/test";
 
-function base64UrlJson(value: unknown): string {
-  return Buffer.from(JSON.stringify(value)).toString("base64url");
+const TEST_JWT_SECRET = "steward-invitation-trust-suite-secret-2026";
+
+// The Playwright worker is an isolated test process. Give the production JWT
+// authority a strong, non-secret test key before minting browser fixtures.
+process.env.STEWARD_JWT_SECRET = TEST_JWT_SECRET;
+
+type VerifiedSession = {
+  aud?: string | string[];
+  iss?: string;
+  jti?: string;
+  tenantId?: string;
+  userId?: string;
+};
+
+async function verifyProductionSession(
+  token: string,
+  expected?: { tenantId: string; userId: string },
+): Promise<VerifiedSession> {
+  const { verifyToken } = await import("../../packages/auth/src/jwt");
+  const payload = await verifyToken(token);
+  expect(payload.iss).toBe("steward");
+  expect(payload.aud).toBe("steward-api");
+  expect(payload.jti).toEqual(expect.any(String));
+  if (expected) {
+    expect(payload).toMatchObject(expected);
+  }
+  return payload;
 }
 
-function sessionToken(tenantId: string, userId: string): string {
-  const now = Math.floor(Date.now() / 1000);
-  return [
-    base64UrlJson({ alg: "none", typ: "JWT" }),
-    base64UrlJson({
+async function sessionToken(tenantId: string, userId: string): Promise<string> {
+  const { signAccessToken } = await import("../../packages/auth/src/jwt");
+  const token = await signAccessToken(
+    {
+      address: "",
       email: `${userId}@example.test`,
-      exp: now + 3600,
-      iat: now,
       role: "owner",
       tenantId,
       tenantRole: "owner",
       userId,
-    }),
-    "test-signature",
-  ].join(".");
+    },
+    "1h",
+  );
+  await verifyProductionSession(token, { tenantId, userId });
+  return token;
+}
+
+async function signedAuthorization(route: Route): Promise<string> {
+  const authorization = route.request().headers().authorization ?? "";
+  expect(authorization).toMatch(/^Bearer /);
+  await verifyProductionSession(authorization.slice("Bearer ".length));
+  return authorization;
 }
 
 const CLAIM_A = "a".repeat(64);
@@ -43,14 +75,14 @@ async function waitForHydration(page: Page): Promise<void> {
 test("only explicit acceptance posts once with current encoded inputs and credential", async ({
   page,
 }) => {
-  const token = sessionToken("session-tenant", "invited-user");
+  const token = await sessionToken("session-tenant", "invited-user");
   await seedSession(page, token);
   const requests: Array<{ url: string; authorization: string | undefined; body: unknown }> = [];
   const pendingRequest: { current: Route | null } = { current: null };
   await page.route("**/user/me/tenants/**/invitations/accept", async (route) => {
     requests.push({
       url: route.request().url(),
-      authorization: route.request().headers().authorization,
+      authorization: await signedAuthorization(route),
       body: route.request().postDataJSON(),
     });
     pendingRequest.current = route;
@@ -94,7 +126,7 @@ test("only explicit acceptance posts once with current encoded inputs and creden
 });
 
 test("decline, navigation, missing parameters, and load never accept", async ({ page }) => {
-  await seedSession(page, sessionToken("session-tenant", "invited-user"));
+  await seedSession(page, await sessionToken("session-tenant", "invited-user"));
   let requests = 0;
   await page.route("**/user/me/tenants/**/invitations/accept", async (route) => {
     requests += 1;
@@ -120,15 +152,18 @@ test("decline, navigation, missing parameters, and load never accept", async ({ 
   expect(requests).toBe(0);
 });
 
-test("route navigation wins over a delayed prior acceptance", async ({ page }) => {
-  const authToken = sessionToken("session-tenant", "invited-user");
-  await seedSession(page, authToken);
+test("session rotation and route navigation win over a delayed prior acceptance", async ({
+  page,
+}) => {
+  const firstAuthToken = await sessionToken("tenant-a", "user-a");
+  const secondAuthToken = await sessionToken("tenant-b", "user-b");
+  await seedSession(page, firstAuthToken);
   const delayedFirst: { current: Route | null } = { current: null };
   const observed: Array<{ tenant: string; authorization: string | undefined }> = [];
   await page.route("**/user/me/tenants/**/invitations/accept", async (route) => {
     const pathname = new URL(route.request().url()).pathname;
     const tenant = pathname.includes("tenant-a") ? "tenant-a" : "tenant-b";
-    observed.push({ tenant, authorization: route.request().headers().authorization });
+    observed.push({ tenant, authorization: await signedAuthorization(route) });
     if (tenant === "tenant-a") {
       delayedFirst.current = route;
       return;
@@ -143,9 +178,13 @@ test("route navigation wins over a delayed prior acceptance", async ({ page }) =
   await page.getByRole("button", { name: "Accept invitation" }).click();
   await expect.poll(() => observed.length).toBe(1);
 
-  await page.evaluate((token) => {
-    window.history.pushState({}, "", `/accept-invitation?tenantId=tenant-b&token=${token}`);
-  }, CLAIM_B);
+  await page.evaluate(
+    ({ claim, session }) => {
+      window.sessionStorage.setItem("steward_session_token", session);
+      window.history.pushState({}, "", `/accept-invitation?tenantId=tenant-b&token=${claim}`);
+    },
+    { claim: CLAIM_B, session: secondAuthToken },
+  );
   await expect(page.getByText(/invited to join tenant-b/)).toBeVisible();
   await delayedFirst.current?.fulfill({
     json: {
@@ -161,18 +200,18 @@ test("route navigation wins over a delayed prior acceptance", async ({ page }) =
   await page.getByRole("button", { name: "Accept invitation" }).click();
   await expect(page.getByText("You've joined tenant-b as member.")).toBeVisible();
   expect(observed).toEqual([
-    { tenant: "tenant-a", authorization: `Bearer ${authToken}` },
-    { tenant: "tenant-b", authorization: `Bearer ${authToken}` },
+    { tenant: "tenant-a", authorization: `Bearer ${firstAuthToken}` },
+    { tenant: "tenant-b", authorization: `Bearer ${secondAuthToken}` },
   ]);
 });
 
 test("the retained document uses the rotated concrete session credential", async ({ page }) => {
-  const firstToken = sessionToken("tenant-a", "user-a");
-  const secondToken = sessionToken("tenant-b", "user-b");
+  const firstToken = await sessionToken("tenant-a", "user-a");
+  const secondToken = await sessionToken("tenant-b", "user-b");
   await seedSession(page, firstToken);
   const observed: Array<string | undefined> = [];
   await page.route("**/user/me/tenants/**/invitations/accept", async (route) => {
-    observed.push(route.request().headers().authorization);
+    observed.push(await signedAuthorization(route));
     const pathname = new URL(route.request().url()).pathname;
     const tenant = pathname.includes("tenant-a") ? "tenant-a" : "tenant-b";
     await route.fulfill({
@@ -197,8 +236,9 @@ test("the retained document uses the rotated concrete session credential", async
 });
 
 test("failure text is sanitized and does not expose server details", async ({ page }) => {
-  await seedSession(page, sessionToken("tenant-a", "user-a"));
+  await seedSession(page, await sessionToken("tenant-a", "user-a"));
   await page.route("**/user/me/tenants/**/invitations/accept", async (route) => {
+    await signedAuthorization(route);
     await route.fulfill({
       status: 403,
       json: { ok: false, error: "database tenant row 42 secret-provider-detail" },
@@ -216,8 +256,9 @@ test("failure text is sanitized and does not expose server details", async ({ pa
 test("network, parse, and malformed-success failures all use the generic message", async ({
   page,
 }) => {
-  await seedSession(page, sessionToken("tenant-a", "user-a"));
+  await seedSession(page, await sessionToken("tenant-a", "user-a"));
   await page.route("**/user/me/tenants/**/invitations/accept", async (route) => {
+    await signedAuthorization(route);
     const token = (route.request().postDataJSON() as { token: string }).token;
     if (token === CLAIM_A) {
       await route.abort("connectionrefused");

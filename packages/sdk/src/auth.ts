@@ -38,6 +38,7 @@ import type {
   StewardMfaRequiredResult,
   StewardOAuthConfig,
   StewardOAuthResult,
+  StewardPasskeyAlreadyRegisteredErrorData,
   StewardProviders,
   StewardRecoveryCodeStatus,
   StewardRecoveryCodesResult,
@@ -287,7 +288,7 @@ function buildSiwsMessage(
 
 type AuthApiResult<T> =
   | { ok: true; status: number; data: T }
-  | { ok: false; status: number; error: string };
+  | { ok: false; status: number; error: string; data: Record<string, unknown> };
 
 // Narrow view of @simplewebauthn/browser — a peer dep we import dynamically.
 type SimpleWebAuthnBrowser = Pick<
@@ -339,10 +340,24 @@ async function authRequest<T>(
       typeof payload.error === "string"
         ? payload.error
         : `Request failed with status ${response.status}`;
-    return { ok: false, status: response.status, error: errMsg };
+    return { ok: false, status: response.status, error: errMsg, data: payload };
   }
 
   return { ok: true, status: response.status, data: payload as unknown as T };
+}
+
+/** Narrow an SDK error to the stable existing-passkey recovery contract. */
+export function isStewardPasskeyAlreadyRegisteredError(
+  error: unknown,
+): error is StewardApiError<StewardPasskeyAlreadyRegisteredErrorData> {
+  if (!(error instanceof StewardApiError) || error.status !== 409) return false;
+  const data = error.data;
+  return (
+    typeof data === "object" &&
+    data !== null &&
+    "code" in data &&
+    data.code === "passkey_already_registered"
+  );
 }
 
 // ─── StewardAuth ──────────────────────────────────────────────────────────────
@@ -823,7 +838,12 @@ export class StewardAuth {
   // ─── Passkey (WebAuthn) ─────────────────────────────────────────────────────
 
   /**
-   * Sign in with a passkey. Smart flow: tries login first, falls back to registration.
+   * Sign in with a discoverable passkey.
+   *
+   * Login options deliberately have the same successful shape whether an
+   * account has passkeys or not, so this method never infers account state or
+   * falls back to registration from the options response. Use `addPasskey`
+   * only after independently proving control of the email address.
    *
    * Requires a browser environment and `@simplewebauthn/browser` installed.
    * Throws `StewardApiError` in Node or when the dependency is missing.
@@ -847,7 +867,8 @@ export class StewardAuth {
       );
     }
 
-    // 1. Try login options. If user has no passkeys (404), fall back to register.
+    // The endpoint is intentionally non-enumerating: an options response does
+    // not prove that an account or credential exists.
     const loginOptsRes = await authRequest<Record<string, unknown>>(
       this.baseUrl,
       "/auth/passkey/login/options",
@@ -860,17 +881,8 @@ export class StewardAuth {
       },
     );
 
-    if (loginOptsRes.ok) {
-      // User exists with passkeys — run authentication flow
-      return this.completePasskeyLogin(email, loginOptsRes.data, browserLib);
-    }
-
-    if (loginOptsRes.status === 404) {
-      // No account or no passkeys — run registration flow
-      return this.completePasskeyRegister(email, browserLib);
-    }
-
-    throw new StewardApiError(loginOptsRes.error, loginOptsRes.status);
+    if (!loginOptsRes.ok) throw new StewardApiError(loginOptsRes.error, loginOptsRes.status);
+    return this.completePasskeyLogin(email, loginOptsRes.data, browserLib);
   }
 
   /**
@@ -883,8 +895,8 @@ export class StewardAuth {
    * the user is now on `waifu.fun`) won’t be removed; this just adds a
    * fresh credential bound to the current origin’s RP.
    *
-   * Behavior mirrors `signInWithPasskey` when no credentials exist, except
-   * it skips the login-options probe and goes straight to registration.
+   * Unlike `signInWithPasskey`, this method explicitly starts registration and
+   * therefore requires an authenticated session or verified-email grant.
    *
    * Requires a browser environment and `@simplewebauthn/browser` installed.
    * Throws `StewardApiError` otherwise.
@@ -967,6 +979,14 @@ export class StewardAuth {
     // brand-new, signed-out user can register their FIRST passkey — the
     // grant proves ownership of the email. Without it, register/options
     // requires an authenticated session.
+    const sessionToken = emailGrant ? null : this.getToken();
+    if (!emailGrant && !sessionToken) {
+      throw new StewardApiError(
+        "Not authenticated. Sign in first or provide a verified-email grant.",
+        0,
+      );
+    }
+
     const regOptsRes = await authRequest<Record<string, unknown>>(
       this.baseUrl,
       "/auth/passkey/register/options",
@@ -978,10 +998,11 @@ export class StewardAuth {
           ...(this.tenantId ? { tenantId: this.tenantId } : {}),
         }),
       },
+      sessionToken,
     );
 
     if (!regOptsRes.ok) {
-      throw new StewardApiError(regOptsRes.error, regOptsRes.status);
+      throw new StewardApiError(regOptsRes.error, regOptsRes.status, regOptsRes.data);
     }
 
     let regResponse: unknown;
@@ -1011,6 +1032,7 @@ export class StewardAuth {
           ...(this.tenantId ? { tenantId: this.tenantId } : {}),
         }),
       },
+      sessionToken,
     );
 
     if (!verifyRes.ok) {
@@ -2631,7 +2653,10 @@ async function generateCodeVerifier(): Promise<string> {
  */
 async function generateCodeChallenge(verifier: string): Promise<string> {
   const encoder = new TextEncoder();
-  const data = encoder.encode(verifier);
+  // `slice()` materializes an ArrayBuffer-backed view. Some runtimes type
+  // TextEncoder output as Uint8Array<ArrayBufferLike>, while WebCrypto only
+  // accepts non-shared BufferSource inputs.
+  const data = encoder.encode(verifier).slice();
   const digest = await globalThis.crypto.subtle.digest("SHA-256", data);
   return base64urlEncode(new Uint8Array(digest));
 }

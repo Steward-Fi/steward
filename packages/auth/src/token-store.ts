@@ -63,6 +63,10 @@ export class TokenStore {
     return this.backend.consume(hash);
   }
 
+  async compareDelete(hash: string, expected: string): Promise<boolean> {
+    return this.backend.compareDelete(hash, expected);
+  }
+
   async transition(
     hash: string,
     expected: string,

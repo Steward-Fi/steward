@@ -123,6 +123,7 @@ describe("0111 tenant RLS policy installation", () => {
     const activate = await readFile(new URL("rls-activate.sql", scripts), "utf8");
     const rollback = await readFile(new URL("rls-rollback.sql", scripts), "utf8");
     const inventory = await readFile(new URL("rls-policy-inventory.sql", scripts), "utf8");
+    const functionManifest = await readFile(new URL("rls-function-manifest.sql", scripts), "utf8");
     expect(bootstrap).toContain("NOINHERIT NOREPLICATION NOBYPASSRLS");
     expect(bootstrap).toContain(
       "app, platform, migration-maintenance, and definer roles must be distinct",
@@ -144,12 +145,20 @@ describe("0111 tenant RLS policy installation", () => {
       "GRANT EXECUTE ON FUNCTION public.steward_lock_personal_lifecycle(uuid,text,boolean) TO %I, %I",
     );
     expect(bootstrap).toContain("platform_set_user_deactivation(uuid,boolean)");
+    expect(activate).toContain(
+      "steward_bootstrap.tenant_set_user_deactivation(text,uuid,uuid,boolean)",
+    );
+    expect(functionManifest).toContain(
+      "'steward_bootstrap.tenant_set_user_deactivation(text,uuid,uuid,boolean)'",
+    );
     expect(bootstrap).toContain("BEGIN;");
     expect(bootstrap).toContain("COMMIT;");
-    expect(inventory).toContain("core 73/75 and optional capabilities 0/0 or 4/4");
+    expect(inventory).toContain("core 74/76 and optional capabilities 0/0 or 4/4");
     expect(inventory).toContain("rls-policy-manifest.sql");
     expect(inventory).toContain("pg_get_expr");
     expect(activate).toContain("\\ir rls-policy-inventory.sql");
+    expect(activate).toContain("'schema:drizzle:USAGE:false'");
+    expect(activate).toContain("__drizzle_migrations_plugin\\_%");
     expect(rollback).toContain("\\ir rls-policy-inventory.sql");
     expect(activate).toContain("ENABLE ROW LEVEL SECURITY");
     expect(activate).toContain("FORCE ROW LEVEL SECURITY");

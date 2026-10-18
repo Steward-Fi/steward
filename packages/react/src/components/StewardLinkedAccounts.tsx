@@ -108,7 +108,22 @@ export function StewardLinkedAccounts({
   const [phoneCode, setPhoneCode] = useState("");
   const [phoneOtpSent, setPhoneOtpSent] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [loadedAuthEpoch, setLoadedAuthEpoch] = useState<string | null>(null);
   const refreshGeneration = useRef(0);
+  const authEpoch = auth.isAuthenticated
+    ? JSON.stringify([
+        auth.session?.token ?? "",
+        auth.user?.id ?? auth.session?.userId ?? "",
+        auth.activeTenantId ?? auth.session?.tenantId ?? "",
+      ])
+    : null;
+  const authEpochRef = useRef(authEpoch);
+  authEpochRef.current = authEpoch;
+
+  const isCurrentAuthEpoch = useCallback(
+    (epoch: string | null): epoch is string => epoch !== null && authEpochRef.current === epoch,
+    [],
+  );
 
   const reportError = useCallback(
     (err: unknown) => {
@@ -119,73 +134,98 @@ export function StewardLinkedAccounts({
     [onError],
   );
 
-  const refresh = useCallback(async () => {
-    if (!auth.isAuthenticated) return;
-    const generation = ++refreshGeneration.current;
-    setIsLoading(true);
-    setError(null);
-    try {
-      const result = await client.listUserAccounts();
-      if (generation !== refreshGeneration.current) return;
-      setPrimaryMethods(result.primaryLoginMethods);
-      setLinkedAccounts(result.accounts);
-      onLoaded?.(result);
-    } catch (err) {
-      if (generation !== refreshGeneration.current) return;
-      reportError(err);
-    } finally {
-      if (generation === refreshGeneration.current) setIsLoading(false);
-    }
-  }, [auth.isAuthenticated, client, onLoaded, reportError]);
+  const refresh = useCallback(
+    async (epoch = authEpoch) => {
+      if (!isCurrentAuthEpoch(epoch)) return;
+      const generation = ++refreshGeneration.current;
+      setIsLoading(true);
+      setError(null);
+      try {
+        const result = await client.listUserAccounts();
+        if (generation !== refreshGeneration.current || !isCurrentAuthEpoch(epoch)) return;
+        setPrimaryMethods(result.primaryLoginMethods);
+        setLinkedAccounts(result.accounts);
+        setLoadedAuthEpoch(epoch);
+        onLoaded?.(result);
+      } catch (err) {
+        if (generation !== refreshGeneration.current || !isCurrentAuthEpoch(epoch)) return;
+        reportError(err);
+      } finally {
+        if (generation === refreshGeneration.current && isCurrentAuthEpoch(epoch)) {
+          setIsLoading(false);
+        }
+      }
+    },
+    [authEpoch, client, isCurrentAuthEpoch, onLoaded, reportError],
+  );
 
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    refreshGeneration.current += 1;
+    setPrimaryMethods([]);
+    setLinkedAccounts([]);
+    setLoadedAuthEpoch(null);
+    setIsLoading(false);
+    setBusyAccount(null);
+    setError(null);
+    setPhoneOtpSent(false);
+    if (authEpoch) void refresh(authEpoch);
+  }, [authEpoch, refresh]);
 
-  const unlinkableLinkedAccounts = linkedAccounts.filter(
+  const visiblePrimaryMethods = loadedAuthEpoch === authEpoch ? primaryMethods : [];
+  const visibleLinkedAccounts = loadedAuthEpoch === authEpoch ? linkedAccounts : [];
+
+  const unlinkableLinkedAccounts = visibleLinkedAccounts.filter(
     (account) => account.provider !== "cross_app",
   );
-  const canUnlink = primaryMethods.length + unlinkableLinkedAccounts.length > 1;
+  const canUnlink = visiblePrimaryMethods.length + unlinkableLinkedAccounts.length > 1;
   const groupedLinkedAccounts = useMemo(() => {
-    return linkedAccounts.reduce<Record<string, UserLinkedAccount[]>>((acc, account) => {
+    return visibleLinkedAccounts.reduce<Record<string, UserLinkedAccount[]>>((acc, account) => {
       const key = labelProvider(account.provider);
       acc[key] ??= [];
       acc[key].push(account);
       return acc;
     }, {});
-  }, [linkedAccounts]);
+  }, [visibleLinkedAccounts]);
 
   async function unlink(account: UserLinkedAccount) {
+    const epoch = authEpoch;
+    if (!isCurrentAuthEpoch(epoch)) return;
     const key = `${account.provider}:${account.providerAccountId}`;
     setBusyAccount(key);
     setError(null);
     try {
       const result = await client.unlinkUserAccount(account.provider, account.providerAccountId);
+      if (!isCurrentAuthEpoch(epoch)) return;
       onUnlink?.(account, result);
-      await refresh();
+      await refresh(epoch);
     } catch (err) {
-      reportError(err);
+      if (isCurrentAuthEpoch(epoch)) reportError(err);
     } finally {
-      setBusyAccount(null);
+      if (isCurrentAuthEpoch(epoch)) setBusyAccount(null);
     }
   }
 
   async function sendPhoneOtp(event: React.FormEvent) {
     event.preventDefault();
+    const epoch = authEpoch;
+    if (!isCurrentAuthEpoch(epoch)) return;
     setBusyAccount(`phone:${phoneChannel}:send`);
     setError(null);
     try {
       await client.sendUserPhoneAccountLinkOtp(phone.trim(), phoneChannel);
+      if (!isCurrentAuthEpoch(epoch)) return;
       setPhoneOtpSent(true);
     } catch (err) {
-      reportError(err);
+      if (isCurrentAuthEpoch(epoch)) reportError(err);
     } finally {
-      setBusyAccount(null);
+      if (isCurrentAuthEpoch(epoch)) setBusyAccount(null);
     }
   }
 
   async function verifyPhoneOtp(event: React.FormEvent) {
     event.preventDefault();
+    const epoch = authEpoch;
+    if (!isCurrentAuthEpoch(epoch)) return;
     setBusyAccount(`phone:${phoneChannel}:verify`);
     setError(null);
     try {
@@ -193,62 +233,75 @@ export function StewardLinkedAccounts({
         { phone: phone.trim(), code: phoneCode.trim() },
         phoneChannel,
       );
+      if (!isCurrentAuthEpoch(epoch)) return;
       onLink?.(result.account);
       setPhone("");
       setPhoneCode("");
       setPhoneOtpSent(false);
-      await refresh();
+      await refresh(epoch);
     } catch (err) {
-      reportError(err);
+      if (isCurrentAuthEpoch(epoch)) reportError(err);
     } finally {
-      setBusyAccount(null);
+      if (isCurrentAuthEpoch(epoch)) setBusyAccount(null);
     }
   }
 
   async function linkEthereumWallet() {
     if (!ethereumWallet) return;
+    const epoch = authEpoch;
+    if (!isCurrentAuthEpoch(epoch)) return;
     setBusyAccount("wallet:ethereum");
     setError(null);
     try {
       const challenge = await client.createUserEthereumWalletLinkNonce(ethereumWallet.address);
+      if (!isCurrentAuthEpoch(epoch)) return;
       const signature = await ethereumWallet.signMessage(challenge.message);
+      if (!isCurrentAuthEpoch(epoch)) return;
       const result = await client.linkUserEthereumWallet({
         address: ethereumWallet.address,
         message: challenge.message,
         signature,
       });
+      if (!isCurrentAuthEpoch(epoch)) return;
       onLink?.(result.account);
-      await refresh();
+      await refresh(epoch);
     } catch (err) {
-      reportError(err);
+      if (isCurrentAuthEpoch(epoch)) reportError(err);
     } finally {
-      setBusyAccount(null);
+      if (isCurrentAuthEpoch(epoch)) setBusyAccount(null);
     }
   }
 
   async function linkSolanaWallet() {
     if (!solanaWallet) return;
+    const epoch = authEpoch;
+    if (!isCurrentAuthEpoch(epoch)) return;
     setBusyAccount("wallet:solana");
     setError(null);
     try {
       const challenge = await client.createUserSolanaWalletLinkNonce(solanaWallet.publicKey);
+      if (!isCurrentAuthEpoch(epoch)) return;
       const signature = await solanaWallet.signMessage(challenge.message);
+      if (!isCurrentAuthEpoch(epoch)) return;
       const result = await client.linkUserSolanaWallet({
         publicKey: solanaWallet.publicKey,
         message: challenge.message,
         signature,
       });
+      if (!isCurrentAuthEpoch(epoch)) return;
       onLink?.(result.account);
-      await refresh();
+      await refresh(epoch);
     } catch (err) {
-      reportError(err);
+      if (isCurrentAuthEpoch(epoch)) reportError(err);
     } finally {
-      setBusyAccount(null);
+      if (isCurrentAuthEpoch(epoch)) setBusyAccount(null);
     }
   }
 
   async function linkOAuthProvider(provider: string) {
     if (!onOAuthLinkRequest) return;
+    const epoch = authEpoch;
+    if (!isCurrentAuthEpoch(epoch)) return;
     setBusyAccount(`oauth:${provider}`);
     setError(null);
     try {
@@ -259,64 +312,74 @@ export function StewardLinkedAccounts({
         throw new Error("oauthRedirectUri is required outside a browser");
       }
       const challenge = await client.createUserOAuthAccountLinkChallenge(provider, { redirectUri });
+      if (!isCurrentAuthEpoch(epoch)) return;
       const input = await onOAuthLinkRequest(provider, challenge);
-      if (!input) return;
+      if (!input || !isCurrentAuthEpoch(epoch)) return;
       const result = await client.linkUserOAuthAccount(provider, {
         ...input,
         redirectUri: input.redirectUri ?? challenge.redirectUri,
         state: input.state ?? challenge.state,
       });
+      if (!isCurrentAuthEpoch(epoch)) return;
       onLink?.(result.account);
-      await refresh();
+      await refresh(epoch);
     } catch (err) {
-      reportError(err);
+      if (isCurrentAuthEpoch(epoch)) reportError(err);
     } finally {
-      setBusyAccount(null);
+      if (isCurrentAuthEpoch(epoch)) setBusyAccount(null);
     }
   }
 
   async function linkTelegram() {
     if (!onTelegramLinkRequest) return;
+    const epoch = authEpoch;
+    if (!isCurrentAuthEpoch(epoch)) return;
     setBusyAccount("social:telegram");
     setError(null);
     try {
       const challenge = await client.createUserTelegramAccountLinkChallenge();
+      if (!isCurrentAuthEpoch(epoch)) return;
       if (!challenge.challengeId) {
         throw new Error("Telegram link challenge did not include a challenge id");
       }
       const input = await onTelegramLinkRequest(challenge.challengeId);
-      if (!input) return;
+      if (!input || !isCurrentAuthEpoch(epoch)) return;
       const result = await client.linkUserTelegramAccount({
         ...input,
         challengeId: challenge.challengeId,
       });
+      if (!isCurrentAuthEpoch(epoch)) return;
       onLink?.(result.account);
-      await refresh();
+      await refresh(epoch);
     } catch (err) {
-      reportError(err);
+      if (isCurrentAuthEpoch(epoch)) reportError(err);
     } finally {
-      setBusyAccount(null);
+      if (isCurrentAuthEpoch(epoch)) setBusyAccount(null);
     }
   }
 
   async function linkFarcaster() {
     if (!onFarcasterLinkRequest) return;
+    const epoch = authEpoch;
+    if (!isCurrentAuthEpoch(epoch)) return;
     setBusyAccount("social:farcaster");
     setError(null);
     try {
       const challenge = await client.createUserFarcasterAccountLinkNonce();
+      if (!isCurrentAuthEpoch(epoch)) return;
       if (!challenge.nonce) {
         throw new Error("Farcaster link challenge did not include a nonce");
       }
       const input = await onFarcasterLinkRequest(challenge.nonce);
-      if (!input) return;
+      if (!input || !isCurrentAuthEpoch(epoch)) return;
       const result = await client.linkUserFarcasterAccount(input);
+      if (!isCurrentAuthEpoch(epoch)) return;
       onLink?.(result.account);
-      await refresh();
+      await refresh(epoch);
     } catch (err) {
-      reportError(err);
+      if (isCurrentAuthEpoch(epoch)) reportError(err);
     } finally {
-      setBusyAccount(null);
+      if (isCurrentAuthEpoch(epoch)) setBusyAccount(null);
     }
   }
 
@@ -352,10 +415,10 @@ export function StewardLinkedAccounts({
       {showPrimaryLoginMethods && (
         <div className="stwd-linked-account-section">
           <div className="stwd-subheading">primary login methods</div>
-          {primaryMethods.length === 0 ? (
+          {visiblePrimaryMethods.length === 0 ? (
             <p className="stwd-muted-text">No primary login methods returned.</p>
           ) : (
-            primaryMethods.map((method) => (
+            visiblePrimaryMethods.map((method) => (
               <AccountRow
                 key={`${method.provider}:${method.providerAccountId}`}
                 provider={method.provider}
@@ -505,7 +568,7 @@ export function StewardLinkedAccounts({
       {showLinkedAccounts && (
         <div className="stwd-linked-account-section">
           <div className="stwd-subheading">connected identities</div>
-          {linkedAccounts.length === 0 ? (
+          {visibleLinkedAccounts.length === 0 ? (
             <p className="stwd-muted-text">No linked accounts yet.</p>
           ) : (
             Object.entries(groupedLinkedAccounts).map(([group, accounts]) => (

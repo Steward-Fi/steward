@@ -11,6 +11,16 @@ on:
     tags: ["v*"]
   pull_request:
     branches: [develop, main]
+    paths:
+      - "Dockerfile"
+      - ".dockerignore"
+      - "package.json"
+      - "bun.lock"
+      - "turbo.json"
+      - "tsconfig.json"
+      - "web/package.json"
+      - "packages/**"
+      - ".github/workflows/docker.yml"
 
 # A branch tag is mutable. Do not let a slower build for an older push finish
 # after a newer build and overwrite `:develop` / `:main` with stale bytes.

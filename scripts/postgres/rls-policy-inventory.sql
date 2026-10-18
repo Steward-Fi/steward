@@ -31,11 +31,11 @@ DO $$
 DECLARE
   mismatch text;
 BEGIN
-  IF (SELECT count(*) FROM steward_expected_rls_policies WHERE relation_name NOT LIKE 'capabilit%') <> 73
-     OR (SELECT sum(expected_policy_count) FROM steward_expected_rls_policies WHERE relation_name NOT LIKE 'capabilit%') <> 75
+  IF (SELECT count(*) FROM steward_expected_rls_policies WHERE relation_name NOT LIKE 'capabilit%') <> 74
+     OR (SELECT sum(expected_policy_count) FROM steward_expected_rls_policies WHERE relation_name NOT LIKE 'capabilit%') <> 76
      OR (SELECT count(*) FROM steward_expected_rls_policies WHERE relation_name LIKE 'capabilit%') NOT IN (0, 4)
      OR (SELECT COALESCE(sum(expected_policy_count), 0) FROM steward_expected_rls_policies WHERE relation_name LIKE 'capabilit%') NOT IN (0, 4) THEN
-    RAISE EXCEPTION 'SEC-169 policy inventory must contain core 73/75 and optional capabilities 0/0 or 4/4';
+    RAISE EXCEPTION 'SEC-169 policy inventory must contain core 74/76 and optional capabilities 0/0 or 4/4';
   END IF;
 
   WITH actual AS (

@@ -19,6 +19,7 @@ import { redactedThrownDiagnostics } from "@stwd/shared";
 import { composeApp, getComposedPluginMigrationSources } from "./compose";
 import { globalRateLimitRequiresRedis } from "./middleware/global-rate-limit";
 import {
+  checkRedisConnectionReadiness,
   getRedisClient,
   initRedis,
   isRedisConfigured,
@@ -37,6 +38,11 @@ import { startProviderReservationReconciliationScheduler } from "./services/prov
 import { startXCredentialLifecycleScheduler } from "./services/provider-x-lifecycle-scheduler";
 import { startRetentionScheduler } from "./services/retention";
 import { SOCKET_PEER_ENV_KEY } from "./services/runtime-gate";
+import {
+  assertStewardOwnedPluginMigrationReadiness,
+  createStewardReleaseReadinessProbe,
+  resolveStewardMigrationReadinessConfig,
+} from "./services/steward-release-readiness";
 import { startTenantDeletionRevocationScheduler } from "./services/tenant-deletion-revocation-scheduler";
 import { startTransactionReceiptPollingScheduler } from "./services/transaction-receipt-poller";
 import {
@@ -51,6 +57,15 @@ import { runStartupPhase } from "./startup-phase";
 
 const PORT = parseInt(process.env.PORT || "3200", 10);
 const startTime = Date.now();
+const migrationReadinessConfig = resolveStewardMigrationReadinessConfig();
+const enabledPlugins = resolveEnabledPlugins();
+assertStewardOwnedPluginMigrationReadiness(migrationReadinessConfig, enabledPlugins);
+const stewardReleaseReadinessProbe =
+  migrationReadinessConfig.mode === "steward-owned"
+    ? createStewardReleaseReadinessProbe({
+        expectedSchema: migrationReadinessConfig.expectedSchema,
+      })
+    : undefined;
 let migrationsRan = false;
 
 if (!Number.isInteger(PORT) || PORT <= 0) {
@@ -74,7 +89,7 @@ const { app, pluginMigrationSources } = await runStartupPhase("compose", async (
   app: await composeApp(),
   pluginMigrationSources: await getComposedPluginMigrationSources(),
 }));
-const capabilitiesEnabled = resolveEnabledPlugins().has("capabilities");
+const capabilitiesEnabled = enabledPlugins.has("capabilities");
 
 // ─── Shutdown guard ──────────────────────────────────────────────────────────
 let isShuttingDown = false;
@@ -132,10 +147,48 @@ app.get(
       };
       try {
         const db = getDb();
-        Object.assign(
-          checks,
-          await readMigrationReadiness({ db, migrationsRan, pluginMigrationSources }),
-        );
+        if (migrationReadinessConfig.mode === "steward-owned") {
+          // Steward-owned production schema (main #919/#923): the ordinary
+          // drizzle ledger is not authoritative; prove the core repair bundle
+          // and auth schema contract instead.
+          const migrationCheck = await readMigrationReadiness({
+            db,
+            migrationsRan,
+            pluginMigrationSources,
+          });
+          checks.database = migrationCheck.database;
+          checks.pluginMigrations = migrationCheck.pluginMigrations;
+          if (!stewardReleaseReadinessProbe) {
+            throw new Error("Steward-owned release readiness probe is not configured");
+          }
+          const inspection = await stewardReleaseReadinessProbe();
+          checks.coreRepair = {
+            ok: inspection.core.status === "already_applied",
+            detail: { schema: inspection.core.schema, bundleHash: inspection.core.bundleHash },
+          };
+          checks.authSchema = {
+            ok: inspection.authSchema.status === "ready",
+            detail: {
+              schema: inspection.authSchema.schema,
+              expectedTip: inspection.authSchema.expectedTip,
+              appliedCount: inspection.authSchema.appliedCount,
+              forwardCount: inspection.authSchema.forwardCount,
+              rpProvenance: inspection.authSchema.rpProvenance,
+            },
+          };
+          checks.migrations = {
+            ok: migrationsRan && checks.coreRepair.ok && checks.authSchema.ok,
+            detail: {
+              mode: migrationReadinessConfig.mode,
+              expectedSchema: migrationReadinessConfig.expectedSchema,
+            },
+          };
+        } else {
+          Object.assign(
+            checks,
+            await readMigrationReadiness({ db, migrationsRan, pluginMigrationSources }),
+          );
+        }
         if (process.env.NODE_ENV === "production") {
           const expectedRole = process.env.STEWARD_APP_DATABASE_ROLE;
           const expectedPlatformRole = process.env.STEWARD_PLATFORM_DATABASE_ROLE;
@@ -167,7 +220,7 @@ app.get(
       try {
         const redis = getRedisClient();
         return redis
-          ? { ok: (await redis.ping()).toUpperCase() === "PONG" }
+          ? { ok: await checkRedisConnectionReadiness() }
           : isRedisConfigured()
             ? redisRequired
               ? { ok: false, error: "Redis is configured but not connected" }
@@ -233,8 +286,30 @@ app.get(
 // ─── Database migrations (blocking — must complete before serving traffic) ───
 
 if (shouldUsePGLite()) {
+  if (migrationReadinessConfig.mode === "steward-owned") {
+    throw new Error("steward-owned migration readiness requires PostgreSQL");
+  }
   migrationsRan = true;
   console.log("[steward] PGLite mode detected — skipping Postgres migrator.");
+} else if (migrationReadinessConfig.mode === "steward-owned") {
+  if (!skipMigrations) {
+    throw new Error("steward-owned migration readiness requires SKIP_MIGRATIONS=1");
+  }
+  try {
+    if (!stewardReleaseReadinessProbe) {
+      throw new Error("Steward-owned release readiness probe is not configured");
+    }
+    console.log("[steward] Verifying Steward-owned production migration contracts...");
+    await stewardReleaseReadinessProbe(true);
+    migrationsRan = true;
+    console.log("[steward] Steward-owned production migration contracts are ready.");
+  } catch (err) {
+    console.error(
+      "[steward] Steward-owned migration readiness failed — cannot start",
+      redactedThrownDiagnostics(err),
+    );
+    process.exit(1);
+  }
 } else if (skipMigrations) {
   migrationsRan = true;
   console.log("[steward] SKIP_MIGRATIONS set — skipping auto-migration. Run migrations manually.");

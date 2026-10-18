@@ -6,9 +6,10 @@
  * plane-down scenario the recovery feature exists to solve).
  *
  * This middleware accepts EITHER credential:
- *   1. A platform key — header `X-Steward-Platform-Key`, validated by
- *      `isValidPlatformKey`. This is the cross-tenant operator credential
- *      (issued out-of-band to trusted operators such as Eliza Cloud).
+ *   1. A platform key — header `X-Steward-Platform-Key`, authenticated and
+ *      authorized for `platform:trade:operator`. This is the cross-tenant
+ *      operator credential (issued out-of-band to trusted operators such as
+ *      Eliza Cloud).
  *   2. A tenant-admin credential — falls through to `tenantAuth`, which
  *      accepts a tenant API key (`X-Steward-Key` + `X-Steward-Tenant`) or a
  *      user session JWT.
@@ -22,7 +23,7 @@
  * tenant-auth path.
  */
 
-import { isValidPlatformKey } from "@stwd/auth";
+import { authorizePlatformKey } from "@stwd/auth";
 import type { Context, Next } from "hono";
 import {
   type ApiResponse,
@@ -37,8 +38,9 @@ export async function operatorAuth(c: Context<{ Variables: AppVariables }>, next
   const platformKey = c.req.header("X-Steward-Platform-Key");
 
   if (platformKey) {
-    if (!isValidPlatformKey(platformKey)) {
-      return c.json<ApiResponse>({ ok: false, error: "Invalid platform key" }, 403);
+    const authorization = authorizePlatformKey(platformKey, "platform:trade:operator");
+    if (!authorization.ok) {
+      return c.json<ApiResponse>({ ok: false, error: authorization.error }, authorization.status);
     }
 
     const tenantId = c.req.header("X-Steward-Tenant") || DEFAULT_TENANT_ID;
@@ -49,6 +51,8 @@ export async function operatorAuth(c: Context<{ Variables: AppVariables }>, next
     c.set("tenant", tenant);
     c.set("tenantConfig", tenantConfigs.get(tenantId) || { id: tenant.id, name: tenant.name });
     c.set("authType", "platform");
+    c.set("platformKeyHash", authorization.keyHash);
+    c.set("platformScopes", authorization.scopes);
     return next();
   }
 

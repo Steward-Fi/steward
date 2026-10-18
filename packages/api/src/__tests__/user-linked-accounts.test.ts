@@ -24,6 +24,16 @@ import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 
 type RedisEntry = { value: string; expiresAt: number };
 const redisEntries = new Map<string, RedisEntry>();
+function readRedisValue(key: string): string | null {
+  const entry = redisEntries.get(key);
+  if (!entry) return null;
+  if (entry.expiresAt <= Date.now()) {
+    redisEntries.delete(key);
+    return null;
+  }
+  return entry.value;
+}
+
 const redisClient = {
   set: async (key: string, value: string, _mode: "PX", ttlMs: number, condition?: "NX") => {
     const existing = redisEntries.get(key);
@@ -31,15 +41,7 @@ const redisClient = {
     redisEntries.set(key, { value, expiresAt: Date.now() + ttlMs });
     return "OK";
   },
-  get: async (key: string) => {
-    const entry = redisEntries.get(key);
-    if (!entry) return null;
-    if (entry.expiresAt <= Date.now()) {
-      redisEntries.delete(key);
-      return null;
-    }
-    return entry.value;
-  },
+  get: async (key: string) => readRedisValue(key),
   getdel: async (key: string) => {
     const entry = redisEntries.get(key);
     redisEntries.delete(key);
@@ -49,6 +51,37 @@ const redisClient = {
     let removed = 0;
     for (const key of keys) if (redisEntries.delete(key)) removed += 1;
     return removed;
+  },
+  eval: async (_script: string, numberOfKeys: number, ...args: Array<string | number>) => {
+    const key = String(args[0]);
+    if (numberOfKeys === 1 && args.length === 2) {
+      const expected = String(args[1]);
+      if (readRedisValue(key) !== expected) return 0;
+      redisEntries.delete(key);
+      return 1;
+    }
+    if (numberOfKeys === 1 && args.length === 4) {
+      const expected = String(args[1]);
+      const desired = String(args[2]);
+      const ttlMs = Number(args[3]);
+      const current = readRedisValue(key);
+      if (current !== expected && current !== desired) return 0;
+      redisEntries.set(key, { value: desired, expiresAt: Date.now() + ttlMs });
+      return 1;
+    }
+    if (numberOfKeys === 2 && args.length === 6) {
+      const guardKey = String(args[1]);
+      const expected = String(args[2]);
+      const desired = String(args[3]);
+      const ttlMs = Number(args[4]);
+      const guardExpected = String(args[5]);
+      if (readRedisValue(guardKey) !== guardExpected) return 0;
+      const current = readRedisValue(key);
+      if (current !== expected && current !== desired) return 0;
+      redisEntries.set(key, { value: desired, expiresAt: Date.now() + ttlMs });
+      return 1;
+    }
+    throw new Error("unsupported Redis test operation");
   },
 };
 
@@ -1544,6 +1577,55 @@ describe("user linked account routes", () => {
       MockSmsInbox.clear();
       delete process.env.SMS_PROVIDER;
       delete process.env.STEWARD_TEST_INBOX;
+    }
+  });
+
+  it("routes phone account-link sends through the requested Twilio Verify channel", async () => {
+    const originalFetch = globalThis.fetch;
+    delete process.env.SMS_PROVIDER;
+    process.env.TWILIO_ACCOUNT_SID = `AC${"a".repeat(32)}`;
+    process.env.TWILIO_AUTH_TOKEN = "twilio-test-auth-token";
+    process.env.TWILIO_VERIFY_SERVICE_SID = `VA${"b".repeat(32)}`;
+    process.env.TWILIO_VERIFY_TOKEN_TTL_SECONDS = "600";
+    process.env.WHATSAPP_OTP_ENABLED = "true";
+    await initAuthStores(false);
+
+    try {
+      const requests: URLSearchParams[] = [];
+      const createdAt = new Date(Date.now() - 1000);
+      globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+        requests.push(new URLSearchParams(String(init?.body)));
+        return new Response(
+          JSON.stringify({ status: "pending", date_created: createdAt.toISOString() }),
+          { status: 201 },
+        );
+      }) as typeof fetch;
+
+      for (const [channel, phone] of [
+        ["sms", "+14155550133"],
+        ["whatsapp", "+14155550134"],
+      ] as const) {
+        const response = await userRoutes.request(`/me/accounts/phone/${channel}/send`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${await tokenFor(userId)}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ phone }),
+        });
+        expect(response.status).toBe(200);
+      }
+
+      expect(requests.map((body) => body.get("Channel"))).toEqual(["sms", "whatsapp"]);
+      expect(requests.map((body) => body.get("To"))).toEqual(["+14155550133", "+14155550134"]);
+    } finally {
+      globalThis.fetch = originalFetch;
+      delete process.env.TWILIO_ACCOUNT_SID;
+      delete process.env.TWILIO_AUTH_TOKEN;
+      delete process.env.TWILIO_VERIFY_SERVICE_SID;
+      delete process.env.TWILIO_VERIFY_TOKEN_TTL_SECONDS;
+      delete process.env.WHATSAPP_OTP_ENABLED;
+      await initAuthStores(false);
     }
   });
 

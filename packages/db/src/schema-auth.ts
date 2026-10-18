@@ -73,6 +73,14 @@ export const authenticators = pgTable(
       .references(() => users.id, { onDelete: "cascade" }),
     credentialId: text("credential_id").notNull().unique(),
     credentialPublicKey: text("credential_public_key").notNull(),
+    /**
+     * WebAuthn relying-party ID that scoped this credential at registration.
+     *
+     * Nullable only for credentials created before migration 0114. A
+     * successful authentication can safely fill legacy provenance because
+     * WebAuthn verifies the RP ID hash as part of that ceremony.
+     */
+    rpId: varchar("rp_id", { length: 253 }),
     counter: integer("counter").notNull().default(0),
     credentialDeviceType: varchar("credential_device_type", { length: 32 }),
     credentialBackedUp: boolean("credential_backed_up").default(false),

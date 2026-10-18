@@ -144,9 +144,13 @@ const ACTION: GithubCanonicalActionV1 = {
 };
 
 async function seedBase() {
+  // The personal-lifecycle identity registry intentionally survives user-row
+  // deletion, so each fixture needs a new subject instead of reusing a retired
+  // identity across beforeEach cycles.
+  IDS.user = randomUUID();
   const db = getDb();
   await db.insert(tenants).values({ id: IDS.tenant, name: "Gov", apiKeyHash: "h" });
-  await db.insert(users).values({ id: IDS.user, email: "gov@t.test" });
+  await db.insert(users).values({ id: IDS.user, email: `gov-${IDS.user}@t.test` });
   await db
     .insert(agents)
     .values({ id: IDS.agent, tenantId: IDS.tenant, name: "A", walletAddress: "0x1" });

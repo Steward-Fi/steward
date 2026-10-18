@@ -201,6 +201,55 @@ describe.skipIf(!databaseUrl)("provider required-audit outbox (real Postgres)", 
     expect(await evidenceRows()).toEqual([{ outbox_id: row.id }]);
   });
 
+  test("a process death after claim leaves a reclaimable lease and no audit", async () => {
+    const row = await resetEvidence();
+    const worker = Bun.spawn(
+      [
+        process.execPath,
+        new URL("./fixtures/provider-audit-outbox-worker.ts", import.meta.url).pathname,
+      ],
+      {
+        cwd: new URL("../../../..", import.meta.url).pathname,
+        env: {
+          ...process.env,
+          DATABASE_URL: databaseUrl!,
+          STEWARD_AUDIT_HMAC_KEY: auditKey,
+          STEWARD_DB_MODE: "postgres",
+          STEWARD_PGLITE_MEMORY: "",
+          TEST_TENANT_ID: tenantId,
+          TEST_INTENT_ID: intentId,
+          TEST_WORKER_MODE: "crash-after-claim",
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    const exit = await worker.exited;
+    if (exit !== 86) throw new Error(await new Response(worker.stderr).text());
+
+    const [abandoned] = await admin!.db
+      .select()
+      .from(providerActionAuditOutbox)
+      .where(eq(providerActionAuditOutbox.id, row.id));
+    expect(abandoned.deliveredAt).toBeNull();
+    expect(abandoned.claimToken).not.toBeNull();
+    expect(await evidenceRows()).toHaveLength(0);
+
+    await admin!.db.execute(sql`
+      UPDATE provider_action_audit_outbox
+      SET claimed_at = now() - interval '2 minutes'
+      WHERE id = ${row.id}::uuid
+    `);
+    expect(await providerActionService.recoverRequiredAuditOutbox(tenantId, intentId)).toBe(1);
+    expect(await evidenceRows()).toEqual([{ outbox_id: row.id }]);
+    const [completed] = await admin!.db
+      .select()
+      .from(providerActionAuditOutbox)
+      .where(eq(providerActionAuditOutbox.id, row.id));
+    expect(completed.deliveredAt).not.toBeNull();
+    expect(completed.claimToken).toBeNull();
+  }, 120_000);
+
   test("stale takeover fences the expired worker token", async () => {
     const row = await resetEvidence();
     let releaseExpired!: () => void;

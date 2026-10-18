@@ -57,6 +57,22 @@ function parseEnv(path: string): Record<string, string> {
   return out;
 }
 
+function hasConfiguredPlatformScope(raw: string | undefined, required: string): boolean {
+  if (!raw?.trim()) return false;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+    return Object.values(parsed).some(
+      (value) =>
+        Array.isArray(value) &&
+        value.every((scope) => typeof scope === "string") &&
+        (value.includes(required) || value.includes("platform:*") || value.includes("*")),
+    );
+  } catch {
+    return false;
+  }
+}
+
 export async function runDoctor(
   options: DoctorOptions = {},
 ): Promise<{ ok: boolean; checks: DoctorCheck[] }> {
@@ -89,6 +105,12 @@ export async function runDoctor(
       name: "strict:platform-scopes",
       ok: Boolean(env.STEWARD_PLATFORM_KEY_SCOPES?.includes("platform:tenant:create")),
       detail: "platform key should include platform:tenant:create for steward tenant create",
+    });
+    checks.push({
+      name: "strict:operator-recovery-scope",
+      ok: hasConfiguredPlatformScope(env.STEWARD_PLATFORM_KEY_SCOPES, "platform:trade:operator"),
+      detail:
+        "at least one platform key must explicitly include platform:trade:operator, platform:*, or * before operator recovery is enabled",
     });
     checks.push({
       name: "strict:proxy-request-signing",

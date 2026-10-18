@@ -171,8 +171,9 @@ export interface StewardEmailOtpResult {
 
 /**
  * Result of `verifyEmailOtp` — a short-lived, single-use grant proving
- * ownership of the email. Pass `emailGrant` to `addPasskey({ emailGrant })`
- * so a brand-new, signed-out user can register a passkey WITHOUT a session.
+ * ownership of the email. Pass `emailGrant` to
+ * `addPasskey(email, { emailGrant })` so a brand-new, signed-out user can
+ * register a passkey WITHOUT a session.
  */
 export interface StewardEmailGrantResult {
   ok: boolean;
@@ -180,6 +181,13 @@ export interface StewardEmailGrantResult {
   emailGrant: string;
   /** Seconds until the grant expires (server-provided). */
   expiresInSeconds: number;
+}
+
+/** Stable server payload for verified-email recovery on an existing RP passkey. */
+export interface StewardPasskeyAlreadyRegisteredErrorData {
+  ok: false;
+  error: string;
+  code: "passkey_already_registered";
 }
 
 export interface StewardTestAccountLoginOptions {

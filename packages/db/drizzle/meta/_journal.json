@@ -708,6 +708,13 @@
       "when": 1787306405000,
       "tag": "0123_personal_lifecycle_invariants",
       "breakpoints": true
+    },
+    {
+      "idx": 124,
+      "version": "7",
+      "when": 1787529855000,
+      "tag": "0114_passkey_rp_provenance",
+      "breakpoints": true
     }
   ]
 }

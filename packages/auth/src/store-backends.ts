@@ -49,6 +49,8 @@ export interface StoreBackend {
   setIfNotExists(key: string, value: string, ttlMs: number): Promise<boolean>;
   get(key: string): Promise<string | null>;
   consume(key: string): Promise<string | null>;
+  /** Atomically delete only a live entry whose value exactly matches expected. */
+  compareDelete(key: string, expected: string): Promise<boolean>;
   /** Atomically replace an exact value. Repeating an already-applied transition succeeds. */
   transition(
     key: string,
@@ -96,6 +98,10 @@ export class NamespacedStoreBackend implements StoreBackend {
 
   async consume(key: string): Promise<string | null> {
     return this.backend.consume(this.key(key));
+  }
+
+  async compareDelete(key: string, expected: string): Promise<boolean> {
+    return this.backend.compareDelete(this.key(key), expected);
   }
 
   async transition(
@@ -179,6 +185,17 @@ export class MemoryBackend implements StoreBackend {
     this.store.delete(key);
     if (Date.now() >= entry.expiresAt) return null;
     return entry.value;
+  }
+
+  async compareDelete(key: string, expected: string): Promise<boolean> {
+    const entry = this.store.get(key);
+    if (!entry || Date.now() >= entry.expiresAt) {
+      if (entry) this.store.delete(key);
+      return false;
+    }
+    if (entry.value !== expected) return false;
+    this.store.delete(key);
+    return true;
   }
 
   async transition(
@@ -317,6 +334,16 @@ export class RedisBackend implements StoreBackend {
       return this.client.getdel(this.prefix + key);
     }
     throw new Error("Redis backend does not support atomic GETDEL token consumption");
+  }
+
+  async compareDelete(key: string, expected: string): Promise<boolean> {
+    const result = await this.client.eval(
+      "if redis.call('GET',KEYS[1])==ARGV[1] then redis.call('DEL',KEYS[1]); return 1 end; return 0",
+      1,
+      this.prefix + key,
+      expected,
+    );
+    return result === 1 || result === "1";
   }
 
   async transition(
@@ -497,6 +524,20 @@ export class PostgresBackend implements StoreBackend {
       RETURNING value
     `;
     return rows[0]?.value ?? null;
+  }
+
+  async compareDelete(key: string, expected: string): Promise<boolean> {
+    await this.ensureTable();
+    const sql = this.getSqlClient();
+    const rows = await sql<Array<{ id: string }>>`
+      DELETE FROM auth_kv_store
+       WHERE id = ${key}
+         AND namespace = ${this.namespace}
+         AND expires_at > clock_timestamp()
+         AND value = ${expected}
+      RETURNING id
+    `;
+    return rows.length > 0;
   }
 
   async transition(

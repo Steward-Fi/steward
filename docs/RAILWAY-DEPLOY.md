@@ -37,7 +37,9 @@ railway link
 
 Or do it in the Railway dashboard: **Project → Settings → Connect Repo → select steward-fi**.
 
-Set the deploy branch (e.g. `develop` or `main`) under **Settings → Deploy → Branch**.
+For a development or staging service, set its deploy branch under **Settings →
+Deploy → Branch**. Production should use the gated immutable-digest workflow,
+not Railway branch auto-deploy.
 
 ---
 
@@ -99,7 +101,7 @@ STEWARD_EXECUTION_AUTH_SECRET=<v1: plus openssl rand -hex 32>
 STEWARD_PLATFORM_KEYS=<stw_platform_ plus 24 random bytes as hex>
 # This bootstrap operator key needs both the generic platform write gate and
 # the route-specific scopes used below. Narrow this list for ongoing operation.
-STEWARD_PLATFORM_KEY_SCOPES={"<same raw platform key>":["platform:write","platform:tenant:create","platform:tenant:read","platform:agent:create","platform:agent-token:create","platform:agent:delete"]}
+STEWARD_PLATFORM_KEY_SCOPES={"<sha256 of same platform key>":["platform:write","platform:tenant:create","platform:tenant:read","platform:agent:create","platform:agent-token:create","platform:agent:delete","platform:trade:operator"]}
 
 # This example uses Steward's built-in local custody. In production that mode
 # decrypts signing keys in application memory and requires an explicit posture
@@ -139,6 +141,14 @@ PASSKEY_ORIGIN=https://your-app.com
 # The restricted API login must never own or migrate schema objects.
 SKIP_MIGRATIONS=true
 ```
+
+Before rolling out a build that enforces scoped operator recovery, update the
+scope map first and run `steward doctor --strict`. Use
+`printf '%s' "$PLATFORM_KEY" | shasum -a 256` locally to obtain the map key;
+never paste the raw credential into tickets or logs. The API remains healthy
+when the scope is absent, but operator recovery fails closed with 403 until an
+operator explicitly grants `platform:trade:operator`. This ordering prevents
+an outage without silently expanding any existing key's authority.
 
 Keep `STEWARD_MIGRATION_DATABASE_URL` and `STEWARD_OPERATOR_DATABASE_URL`
 outside the API service in a separately protected release job. The operator
@@ -185,6 +195,10 @@ Under **Service → Settings → Deploy → Health Check**:
 - **Port:** `3200`
 - **Timeout:** `45s` (Steward runs migrations on first boot, may take a moment)
 
+The repository's `railway.json` also declares `/health` with a 120-second
+timeout. Verify the effective service setting explicitly for image-only
+services, which may not consume repository config as code.
+
 ### Start Command
 
 Leave blank — the Dockerfile's `CMD` handles it:
@@ -196,7 +210,7 @@ CMD ["bun", "packages/api/src/index.ts"]
 
 ## 5. Deploy
 
-### Via GitHub (auto-deploy)
+### Via GitHub (staging auto-deploy)
 
 Push to your configured branch:
 
@@ -204,13 +218,18 @@ Push to your configured branch:
 git push origin develop
 ```
 
-Railway picks it up automatically. Watch the build in the dashboard.
+Railway picks it up automatically. Watch the build in the dashboard. Do not
+configure production to follow this mutable branch.
 
 ### Via CLI (manual)
 
 ```bash
 railway up
 ```
+
+Use direct CLI deploys for development or initial self-hosting only. Established
+production instances should follow the immutable, main-built digest flow in the
+[production promotion and rollback runbook](runbooks/production-promotion.md).
 
 ### Database release gate
 
@@ -230,12 +249,44 @@ psql "$STEWARD_MIGRATION_DATABASE_URL" \
   -f scripts/postgres/rls-activate.sql
 ```
 
+### First deploy
+
 The API command applies both core and enabled-plugin journals; the DB-only
 migrator is not a complete release. On a brand-new empty database, run the
 initial complete migration with the provider operator as `DATABASE_URL`, then
 bootstrap/provision the three login credentials and activate. Subsequent
 releases use the dedicated migrator. Only after this gate passes may the API
 start with `SKIP_MIGRATIONS=true` and be checked at `/health` and `/ready`.
+
+Staging automates this sequence in `deploy-staging.yml` after the exact
+`develop` SHA has passed both CI and Docker validation. Protect the GitHub
+`staging` environment and configure these environment secrets:
+
+- `STAGING_MIGRATION_DATABASE_URL`
+- `STAGING_OPERATOR_DATABASE_URL`
+- `RAILWAY_TOKEN`
+
+Configure `STAGING_RAILWAY_PROJECT_ID`, `STAGING_RAILWAY_SERVICE_ID`,
+`STAGING_RAILWAY_ENV_ID`, `STAGING_RAILWAY_HEALTH_URL`, and
+`STAGING_RAILWAY_DIRECT_HEALTH_URL` as non-secret environment variables, along
+with the exact `STAGING_*_DATABASE_ROLE` identities and
+`STAGING_STEWARD_PLUGINS` selection. The public/custom and direct Railway
+health origins must be distinct.
+
+Do not copy the application `DATABASE_URL` into GitHub. The release job reads
+the service's rendered `DATABASE_URL` through Railway's API without logging it,
+then proves the migration and operator credentials reach that same PostgreSQL
+database using a non-secret server-side fingerprint. The release requires
+`EXECUTE` on `pg_control_system()` for all three identities and fails before
+mutation if the stable cluster identifier is unavailable; it never falls back
+to a proxy-visible host or database OID that could collide.
+
+Migrations must be expand-only and compatible with the currently deployed
+image. After releasing the schema, the job confirms the Railway deployment ID
+and image did not change, then requires the existing image to pass `/health`
+and `/ready` through both the public and direct Railway origins. Only then may
+the workflow change the image. A compatibility failure stops image cutover and
+requires a forward fix; it does not authorize an automatic database rollback.
 
 Watch logs:
 ```bash
@@ -290,8 +341,10 @@ export BASE="https://steward.elizacloud.ai"  # or your Railway URL
 curl -sf "$BASE/health"
 # → {"status":"ok","version":"<current API version>","uptime":...}
 
-# Deep readiness check (verifies DB + migrations + vault)
-curl -sf "$BASE/ready"
+# Deep readiness check (verifies DB + migrations + vault). Production release
+# acceptance requires the operator header; do not print the verbose body in CI.
+curl -sf "$BASE/ready" \
+  -H "X-Steward-Probe-Token: $STEWARD_READY_PROBE_TOKEN"
 # → {"status":"ready","version":"<current API version>","uptime":...,"checks":{"migrations":{"ok":true},"database":{"ok":true},...}}
 # Set STEWARD_READY_PROBE_TOKEN and send X-Steward-Probe-Token only from an
 # operator probe when the full diagnostic details are required.
@@ -378,7 +431,7 @@ Redeploy the Vercel app after setting these.
 
 ## 9. CI/CD
 
-### Auto-deploy on push (recommended)
+### Staging auto-deploy on push
 
 Railway auto-deploys when you push to the connected branch:
 
@@ -388,20 +441,42 @@ git push origin develop
 ```
 
 Configure the branch in **Service → Settings → Source → Deploy Branch**.
+Production must not auto-deploy a mutable branch or tag.
 
-### Manual deploy via CLI
+### Manual development deploy via CLI
 
 ```bash
 # Deploy current directory
 railway up
 
-# Deploy with a specific environment
-railway up --environment production
+# Deploy with a specific non-production environment
+railway up --environment staging
 ```
+
+For production, dispatch **Deploy Railway (Production)** with a full commit SHA
+already on `main`. The workflow requires an exact successful main Docker build,
+resolves its manifest digest, and passes only that digest to Railway. It also
+sets and verifies Railway's effective `healthcheckPath=/health` and
+`overlapSeconds=0`, polls only the new deployment ID returned by Railway,
+verifies that deployment's image/digest metadata, and requires authenticated
+`/ready` using the protected GitHub `STEWARD_READY_PROBE_TOKEN` secret. A public
+`/health` response alone is never production release evidence because the
+previous instance could answer it. See the
+[production promotion and rollback runbook](runbooks/production-promotion.md).
+Before mutating Railway, the script reads the effective rendered variables for
+the exact Railway project/service/environment and verifies in-process that its
+`STEWARD_READY_PROBE_TOKEN` exactly matches the protected GitHub secret. It
+never prints the variables response or either token. This control-plane check
+is compatible with a pinned rollback image that predates authenticated verbose
+`/ready`; the newly deployed candidate must still pass the strict authenticated
+`/ready` gate after cutover.
 
 ### Rollback
 
-In the Railway dashboard: **Deployments → click a previous successful deploy → Rollback**.
+Redeploy the last known-good main commit through the same production workflow;
+the provenance, immutable-digest, and `/health` gates still apply. Do not roll
+production back to a mutable branch/tag selector. See the
+[production promotion and rollback runbook](runbooks/production-promotion.md).
 
 ---
 
@@ -514,6 +589,7 @@ curl -sf "$BASE/platform/tenants" \
 | `STEWARD_JWT_SECRET` | **Yes** | — | Canonical server-side signing and verification secret for user, session, and agent JWTs. Must be at least 32 characters in production. |
 | `STEWARD_SESSION_SECRET` | No | — | Deprecated compatibility fallback. Rename existing deployments to `STEWARD_JWT_SECRET`. |
 | `STEWARD_PLATFORM_KEYS` | **Yes** | — | Platform admin key(s), comma-separated |
+| `STEWARD_READY_PROBE_TOKEN` | **Yes for production release acceptance** | — | Dedicated operator token for verbose `/ready` diagnostics. Store the matching value in the protected GitHub `Production` environment; send only as `X-Steward-Probe-Token`. |
 | `STEWARD_PLATFORM_KEY_SCOPES` | **Yes for platform routes** | — | JSON map from a raw platform key (or its SHA-256 hex digest) to explicit scopes. Unmapped keys authenticate but have no authorization. |
 | `STEWARD_EMAIL_CODE_SECRET` | **Yes for email auth** | — | Separate secret binding email codes and polling receipts; at least 32 characters in production. |
 | `STEWARD_AUDIT_HMAC_KEY` | **Yes in production** | — | Separate HMAC root for the tenant audit chain. |

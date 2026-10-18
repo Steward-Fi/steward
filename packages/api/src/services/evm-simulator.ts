@@ -72,7 +72,7 @@ function hexWei(decimal: string): `0x${string}` {
 export class JsonRpcEvmSimulator implements EvmSimulator {
   private readonly env: Readonly<Record<string, string | undefined>>;
 
-  constructor(env: Record<string, string | undefined> = process.env) {
+  constructor(env: Record<string, string | undefined>) {
     this.env = Object.freeze({ ...env });
   }
 

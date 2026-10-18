@@ -40,7 +40,7 @@ function platformKey(): string {
 function renderEnv(options: InitOptions): string {
   const platform = platformKey();
   const scopes = JSON.stringify({
-    [platform]: ["platform:write", "platform:tenant:create"],
+    [platform]: ["platform:write", "platform:tenant:create", "platform:trade:operator"],
   });
   // Production uses four non-interchangeable database identities. The bundled
   // administrator creates/transfers the schema, the migration role applies

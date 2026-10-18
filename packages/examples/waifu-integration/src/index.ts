@@ -82,14 +82,16 @@ function weiToEthLabel(value: string): string {
 
 async function signWebhookPayload(payload: string, secret: string): Promise<string> {
   const encoder = new TextEncoder();
+  const secretBytes = encoder.encode(secret).slice();
   const key = await crypto.subtle.importKey(
     "raw",
-    encoder.encode(secret),
+    secretBytes,
     { name: "HMAC", hash: "SHA-256" },
     false,
     ["sign"],
   );
-  const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(payload));
+  const payloadBytes = encoder.encode(payload).slice();
+  const signature = await crypto.subtle.sign("HMAC", key, payloadBytes);
   return Array.from(new Uint8Array(signature), (byte) => byte.toString(16).padStart(2, "0")).join(
     "",
   );

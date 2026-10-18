@@ -93,7 +93,7 @@ describe("capability plugin migrations: namespaced-journal isolation", () => {
     const pluginLedger = await client.query(
       `SELECT count(*)::int AS n FROM drizzle."__drizzle_migrations_plugin_capabilities"`,
     );
-    expect(pluginLedger.rows[0].n).toBeGreaterThanOrEqual(4);
+    expect(pluginLedger.rows[0].n).toBeGreaterThanOrEqual(7);
 
     // (c) the core journal carries NO capability-invocations migration row.
     const coreLedger = await client.query(
@@ -141,6 +141,23 @@ describe("capability plugin migrations: namespaced-journal isolation", () => {
          AND relforcerowsecurity`,
     );
     expect(pluginRls.rows[0].n).toBe(4);
+    const maintenancePolicies = await client.query(
+      `SELECT count(*)::int AS n FROM pg_policy policy
+       JOIN pg_class relation ON relation.oid = policy.polrelid
+       JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+       WHERE namespace.nspname = 'public'
+         AND relation.relname IN (
+           'capabilities', 'capability_grants', 'capability_invocations',
+           'capability_rate_limit_buckets'
+         )
+         AND policy.polname = 'steward_migration_maintenance'
+         AND policy.polcmd = '*'
+         AND policy.polpermissive
+         AND policy.polroles = ARRAY[relation.relowner]
+         AND pg_get_expr(policy.polqual, policy.polrelid, false) = 'true'
+         AND pg_get_expr(policy.polwithcheck, policy.polrelid, false) = 'true'`,
+    );
+    expect(maintenancePolicies.rows[0].n).toBe(4);
     const bucketConstraint = await client.query(
       `SELECT count(*)::int AS n FROM pg_constraint
        WHERE conname = 'capability_rate_limit_buckets_surface_check'`,
@@ -158,6 +175,85 @@ describe("capability plugin migrations: namespaced-journal isolation", () => {
          AND NOT tgisinternal`,
     );
     expect(bucketFence.rows[0].n).toBe(1);
+  });
+
+  test("0006 reconciles both legitimate 0005 outcomes to the same policy definitions", async () => {
+    harness = await makeHarness();
+    const { client } = harness;
+    const tables = [
+      "capabilities",
+      "capability_grants",
+      "capability_invocations",
+      "capability_rate_limit_buckets",
+    ];
+    const inheritance = await readFile(
+      new URL("../../drizzle/0005_activated_rls_inheritance.sql", import.meta.url),
+      "utf8",
+    );
+    const reconciliation = await readFile(
+      new URL("../../drizzle/0006_maintenance_policy_reconciliation.sql", import.meta.url),
+      "utf8",
+    );
+    const dropMaintenancePolicies = async () => {
+      for (const table of tables) {
+        await client.exec(`DROP POLICY IF EXISTS steward_migration_maintenance ON public.${table}`);
+      }
+    };
+    const policyDefinitions = async () =>
+      (
+        await client.query(
+          `SELECT relation.relname AS table_name, policy.polcmd AS command,
+                  policy.polpermissive AS permissive,
+                  policy.polroles::text AS roles,
+                  pg_get_expr(policy.polqual, policy.polrelid, false) AS using_expression,
+                  pg_get_expr(policy.polwithcheck, policy.polrelid, false) AS check_expression
+           FROM pg_policy policy
+           JOIN pg_class relation ON relation.oid = policy.polrelid
+           JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+           WHERE namespace.nspname = 'public'
+             AND relation.relname IN (${tables.map((table) => `'${table}'`).join(", ")})
+             AND policy.polname = 'steward_migration_maintenance'
+           ORDER BY relation.relname`,
+        )
+      ).rows;
+
+    await dropMaintenancePolicies();
+    await client.exec("ALTER TABLE public.agents DISABLE ROW LEVEL SECURITY");
+    for (const table of tables) {
+      await client.exec(`ALTER TABLE public.${table} NO FORCE ROW LEVEL SECURITY`);
+      await client.exec(`ALTER TABLE public.${table} DISABLE ROW LEVEL SECURITY`);
+    }
+    await client.exec(inheritance);
+    expect(await policyDefinitions()).toHaveLength(0);
+    await client.exec(reconciliation);
+    const upgradedFromZero = await policyDefinitions();
+    expect(upgradedFromZero).toHaveLength(4);
+    const disabledPluginRls = await client.query(
+      `SELECT count(*)::int AS n FROM pg_class relation
+       JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+       WHERE namespace.nspname = 'public'
+         AND relation.relname IN (${tables.map((table) => `'${table}'`).join(", ")})
+         AND NOT relation.relrowsecurity
+         AND NOT relation.relforcerowsecurity`,
+    );
+    expect(disabledPluginRls.rows[0].n).toBe(4);
+
+    await dropMaintenancePolicies();
+    await client.exec("ALTER TABLE public.agents ENABLE ROW LEVEL SECURITY");
+    await client.exec("ALTER TABLE public.agents FORCE ROW LEVEL SECURITY");
+    await client.exec(inheritance);
+    expect(await policyDefinitions()).toHaveLength(4);
+    await client.exec(reconciliation);
+    expect(await policyDefinitions()).toEqual(upgradedFromZero);
+    const activatedPluginRls = await client.query(
+      `SELECT count(*)::int AS n FROM pg_class relation
+       JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+       WHERE namespace.nspname = 'public'
+         AND relation.relname IN (${tables.map((table) => `'${table}'`).join(", ")})
+         AND relation.relrowsecurity
+         AND relation.relforcerowsecurity`,
+    );
+    expect(activatedPluginRls.rows[0].n).toBe(4);
   });
 
   test("0002 revokes orphan grants without disabling a different tenant's route", async () => {

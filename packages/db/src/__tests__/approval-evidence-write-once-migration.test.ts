@@ -29,6 +29,11 @@ async function applyAll(client: PGlite) {
   for (const file of files) await applyFile(client, file);
 }
 
+async function applyThrough(client: PGlite, last: string) {
+  const files = (await readdir(migrations)).filter((f) => f.endsWith(".sql") && f <= last).sort();
+  for (const file of files) await applyFile(client, file);
+}
+
 const IDS = {
   wsA: "00000000-0000-4000-8000-000000000101",
   acctA: "00000000-0000-4000-8000-000000000201",
@@ -94,9 +99,10 @@ async function approveBinding(client: PGlite) {
   `);
 }
 
-async function freshApprovedClient(): Promise<PGlite> {
+async function freshApprovedClient(lastMigration?: string): Promise<PGlite> {
   const client = new PGlite("memory://");
-  await applyAll(client);
+  if (lastMigration) await applyThrough(client, lastMigration);
+  else await applyAll(client);
   await seed(client);
   await insertPendingApprovalBinding(client);
   await approveBinding(client);
@@ -194,8 +200,49 @@ describe("0090 approval evidence write-once guard (SEC-031)", () => {
     await client.close();
   });
 
-  test("execution-policy evidence gate still permits approved -> execution_ready", async () => {
-    const client = await freshApprovedClient();
+  test("production rollback image resume shape fails closed after the 0084 authority fence", async () => {
+    const client = await freshApprovedClient("0110_agent_delete_lease_lifecycle.sql");
+
+    // Exact production rollback baseline:
+    //   image sha256:51557626b6c3215d432c7f4077b1cf44a059051d5a763384335a88270b371ca1
+    //   source a7b1b4d5232a234e0e3e86e600f58ef9ce8f68ad
+    // Its provider-approval resume UPDATE sets only these legacy fields; it has
+    // no execute-time policy evidence to write. The repaired schema must reject
+    // that shape rather than manufacture or bypass authority evidence.
+    await expect(
+      client.exec(`
+        UPDATE provider_action_bindings
+        SET status='execution_ready', binding_revision=3,
+            resume_actor='steward-system',
+            resume_attempt_id='00000000-0000-4000-8000-000000000502',
+            resume_validated_at=now(), updated_at=now()
+        WHERE intent_id='intent-1'
+      `),
+    ).rejects.toMatchObject({
+      code: "23514",
+      constraint: "provider_action_bindings_execution_policy_ready_chk",
+    });
+
+    const rows = await client.query<{
+      status: string;
+      binding_revision: number;
+      execution_policy_decision_id: string | null;
+    }>(`
+      SELECT status, binding_revision, execution_policy_decision_id
+      FROM provider_action_bindings WHERE intent_id='intent-1'
+    `);
+    expect(rows.rows).toEqual([
+      {
+        status: "approved",
+        binding_revision: 2,
+        execution_policy_decision_id: null,
+      },
+    ]);
+    await client.close();
+  });
+
+  test("evidence-capable candidate still permits approved -> execution_ready", async () => {
+    const client = await freshApprovedClient("0110_agent_delete_lease_lifecycle.sql");
     await client.exec(`
       UPDATE provider_action_bindings
       SET status='execution_ready', binding_revision=3,

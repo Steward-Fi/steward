@@ -215,6 +215,7 @@ async function fetchWithdrawable(walletAddress: string): Promise<string | null> 
  */
 export function createOperatorRecoveryRoutes(
   ctx: StewardAppContext,
+  options: { memoryRateLimitMaxEntries?: number } = {},
 ): Hono<{ Variables: AppVariables }> {
   const {
     db,
@@ -328,7 +329,7 @@ export function createOperatorRecoveryRoutes(
   // acknowledged single-instance deployment.
   const OPERATOR_TRANSFER_RATE_WINDOW_MS = 60_000;
   const OPERATOR_TRANSFER_MAX_CALLS = 10;
-  const operatorTransferRateLimit = new MemoryTradingRateLimiter();
+  const operatorTransferRateLimit = new MemoryTradingRateLimiter(options.memoryRateLimitMaxEntries);
 
   async function enforceOperatorTransferRateLimit(
     rail: "withdraw" | "usd-send",
@@ -667,7 +668,11 @@ export function createOperatorRecoveryRoutes(
   } {
     // operatorAuth sets authType to "platform" when authenticated via platform key.
     if (c.get("authType") === "platform") {
-      return { actorType: "platform", actorId: "platform-operator" };
+      const platformKeyHash = c.get("platformKeyHash");
+      if (!platformKeyHash) {
+        throw new Error("Authenticated platform operator is missing its key identity");
+      }
+      return { actorType: "platform", actorId: `platform-key:${platformKeyHash}` };
     }
     const userId = c.get("userId");
     if (userId) return { actorType: "user", actorId: userId };
@@ -995,6 +1000,9 @@ export function createOperatorRecoveryRoutes(
         data,
         chainId: ARBITRUM_CHAIN_ID,
         venue: "hyperliquid",
+        // Bind signing to the venue wallet authorized above. The vault holds
+        // the matching custody lock through signing and broadcast.
+        walletAddress,
         broadcast: true,
       });
     } catch (err) {
@@ -1656,8 +1664,10 @@ export function createOperatorRecoveryRoutes(
       body.idempotencyKey,
       requestCommitment,
     );
-    const replayResponse = operatorIdempotencyResponse(c, idempotency);
-    if (replayResponse) return replayResponse;
+    // Redis is only a concurrency/cache layer for this capital movement. The
+    // HMAC-chained audit log is authoritative for terminal replay. A cache
+    // entry without matching durable evidence is an integrity mismatch, not a
+    // successful replay.
 
     // Establish a non-keyed HMAC-chain guard before interpreting absence. If a
     // prior keyed requested/terminal pair was deleted, full-chain verification
@@ -1705,6 +1715,19 @@ export function createOperatorRecoveryRoutes(
     }
     const durableResponse = durableTransferResponse(c, durableState, requestFingerprint);
     if (durableResponse) return durableResponse;
+    if (idempotency.conflict) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Idempotency key reused with a different body" },
+        409,
+      );
+    }
+    if (idempotency.entry) {
+      c.header("Retry-After", "60");
+      return c.json<ApiResponse>(
+        { ok: false, error: "Collateral transfer replay evidence requires reconciliation" },
+        409,
+      );
+    }
 
     const agent = await ensureAgentForTenant(tenantId, agentId);
     if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
@@ -1814,8 +1837,15 @@ export function createOperatorRecoveryRoutes(
     // retry and is NOT stored; a submit failure means the transfer may have
     // landed, so the ambiguous outcome IS stored and retries replay it.
     idempotency = await claimOperatorIdempotency(idempotency);
-    const idempotencyClaimResponse = operatorIdempotencyResponse(c, idempotency);
-    if (idempotencyClaimResponse) return idempotencyClaimResponse;
+    if (idempotency.conflict || idempotency.entry) {
+      // A concurrent cache result cannot overrule the requested marker just
+      // committed above. Force reconciliation against durable evidence.
+      c.header("Retry-After", "60");
+      return c.json<ApiResponse>(
+        { ok: false, error: "Collateral transfer replay evidence requires reconciliation" },
+        409,
+      );
+    }
     let signed: Awaited<ReturnType<HyperliquidAdapter["signSendAsset"]>>;
     try {
       signed = await adapter.signSendAsset({

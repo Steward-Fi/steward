@@ -137,7 +137,7 @@ function requireSha256XmlSignatures(document: Document): void {
 async function assertValidatedTrustPins(
   profile: Record<string, unknown>,
   input: VerifySamlAcsInput,
-): Promise<void> {
+): Promise<string> {
   const getAssertionXml = profile.getAssertionXml;
   const getSamlResponseXml = profile.getSamlResponseXml;
   if (typeof getAssertionXml !== "function" || typeof getSamlResponseXml !== "function") {
@@ -148,6 +148,15 @@ async function assertValidatedTrustPins(
   // mandatory above. Attribute values still come exclusively from `profile`.
   const assertionDocument = await parseDomFromString(String(getAssertionXml()));
   const responseDocument = await parseDomFromString(String(getSamlResponseXml()));
+
+  const assertionIds = xpath.selectAttributes(
+    assertionDocument,
+    "/*[local-name(.)='Assertion']/@ID",
+  );
+  const assertionId = assertionIds[0]?.value.trim() ?? "";
+  if (assertionIds.length !== 1 || !assertionId) {
+    throw new Error("SAML assertion ID is required for replay protection");
+  }
 
   if (responseDocument.documentElement.getAttribute("Destination") !== input.acsUrl) {
     throw new Error("SAML response destination is not the configured ACS URL");
@@ -175,6 +184,7 @@ async function assertValidatedTrustPins(
   }
   requireSha256XmlSignatures(assertionDocument);
   requireSha256XmlSignatures(responseDocument);
+  return assertionId;
 }
 
 export async function verifySamlAcsResponse(
@@ -214,9 +224,7 @@ export async function verifySamlAcsResponse(
   }
 
   const profile = result.profile as Record<string, unknown>;
-  await assertValidatedTrustPins(profile, input);
-  const assertionId = firstString(profile.ID);
-  if (!assertionId) throw new Error("SAML assertion ID is required for replay protection");
+  const assertionId = await assertValidatedTrustPins(profile, input);
 
   const emailAttribute = input.emailAttribute || "email";
   const email = firstString(profile[emailAttribute]);

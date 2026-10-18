@@ -64,25 +64,39 @@ function authHeaders(token: string | null, tenantId: string | null): HeadersInit
 
 async function readJsonOrThrow(res: Response): Promise<unknown> {
   const text = await res.text();
-  const parsed = text ? JSON.parse(text) : null;
   if (!res.ok) {
     // Non-enumerating 404/403 surfaces as a uniform "not found / not authorized"
     // (SCOPE_RESOURCE_NOT_FOUND and CASE_NOT_FOUND both collapse here, §7.3).
     let code = `HTTP ${res.status}`;
     if (res.status === 403 || res.status === 404) {
       code = "not found / not authorized";
-    } else if (parsed && typeof parsed === "object" && "error" in parsed) {
-      const error = (parsed as { error?: unknown }).error;
-      if (error && typeof error === "object" && "code" in error) {
-        const nestedCode = (error as { code?: unknown }).code;
-        if (typeof nestedCode === "string" && nestedCode.length > 0) code = nestedCode;
-      } else if (typeof error === "string" && error.length > 0) {
-        code = error;
+    } else {
+      let parsed: unknown = null;
+      try {
+        parsed = text ? JSON.parse(text) : null;
+      } catch {
+        // Proxies and upstreams commonly return HTML/text for failures. The
+        // HTTP status remains authoritative; malformed error bodies must not
+        // bypass normalization with a raw SyntaxError.
+      }
+      if (parsed && typeof parsed === "object" && "error" in parsed) {
+        const error = (parsed as { error?: unknown }).error;
+        if (error && typeof error === "object" && "code" in error) {
+          const nestedCode = (error as { code?: unknown }).code;
+          if (typeof nestedCode === "string" && nestedCode.length > 0) code = nestedCode;
+        } else if (typeof error === "string" && error.length > 0) {
+          code = error;
+        }
       }
     }
     throw new ProviderActionError(code, res.status);
   }
-  return parsed;
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new ProviderActionError("invalid JSON response", res.status);
+  }
 }
 
 export class ProviderActionError extends Error {

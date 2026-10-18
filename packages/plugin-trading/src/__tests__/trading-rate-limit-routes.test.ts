@@ -30,6 +30,7 @@ async function makeOperatorApp() {
   app.use("*", async (c, next) => {
     c.set("tenantId", "rate-limit-tenant");
     c.set("authType", "platform");
+    c.set("platformKeyHash", "rate-limit-test-platform-key-hash");
     await next();
   });
   app.route(

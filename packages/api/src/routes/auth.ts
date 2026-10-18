@@ -11,8 +11,8 @@
  * GET  /providers                   — available auth methods (passkey/email/siwe/google/discord)
  * POST /logout                      — client-side logout (no-op server side)
  *
- * POST /passkey/register/options    — { email } → WebAuthn creation options
- * POST /passkey/register/verify     — { email, response } → { token, user }
+ * POST /passkey/register/options    — { email, emailGrant? } → WebAuthn creation options
+ * POST /passkey/register/verify     — { email, response, emailGrant? } → { token, user }
  * POST /passkey/login/options       — { email } → WebAuthn request options
  * POST /passkey/login/verify        — { email, response } → { token, user }
  *
@@ -78,6 +78,7 @@ import {
   isBuiltInProvider,
   isValidE164,
   type MagicLinkTemplateData,
+  type ManagedSmsOtpProvider,
   MockEmailInbox,
   MockEmailProvider,
   MockSmsInbox,
@@ -92,7 +93,9 @@ import {
   ResendProvider,
   renderCustomTemplate,
   revocationStore,
+  SmsChallengeInProgressError,
   type SmsProvider,
+  SmsVerificationNotAttemptedError,
   type StoreBackend,
   type StoredRecoveryCode,
   signAccessToken,
@@ -100,6 +103,7 @@ import {
   type TelegramLoginPayload,
   TokenStore,
   TwilioSmsProvider,
+  TwilioVerifyProvider,
   uint8ArrayToBase64url,
   unusedRecoveryCodeCount,
   verifyFarcasterLogin,
@@ -187,7 +191,8 @@ async function withVerifiedAuthTenant<T>(
     userId: subject,
   });
   const driver =
-    process.env.STEWARD_DB_MODE === "pglite" || process.env.STEWARD_PGLITE_MEMORY === "true"
+    runtimeEnvironmentValue("STEWARD_DB_MODE") === "pglite" ||
+    runtimeEnvironmentValue("STEWARD_PGLITE_MEMORY") === "true"
       ? "pglite"
       : getDatabaseDriver();
   return withTenantRlsTransaction(getDb() as never, driver, context, async (tx) =>
@@ -207,7 +212,8 @@ async function withPreAuthTenant<T>(
     subject: "public-auth-flow",
   });
   const driver =
-    process.env.STEWARD_DB_MODE === "pglite" || process.env.STEWARD_PGLITE_MEMORY === "true"
+    runtimeEnvironmentValue("STEWARD_DB_MODE") === "pglite" ||
+    runtimeEnvironmentValue("STEWARD_PGLITE_MEMORY") === "true"
       ? "pglite"
       : getDatabaseDriver();
   return withTenantRlsTransaction(getDb() as never, driver, context, async (tx) =>
@@ -604,24 +610,57 @@ export async function getSmsVerifyFailedAttempts(phone: string, purpose: string)
   return attempts.filter((value) => value !== null).length;
 }
 
+export type SmsVerifyAttemptClaim = {
+  key: string;
+  token: string;
+};
+
 /**
  * Atomically reserve one of the five verification-attempt slots. Using
  * set-if-absent slots keeps the limit correct under concurrent requests on
  * every shipped backend without relying on a read-then-write counter.
  */
-export async function claimSmsVerifyAttempt(phone: string, purpose: string): Promise<boolean> {
+export async function claimSmsVerifyAttempt(
+  phone: string,
+  purpose: string,
+): Promise<SmsVerifyAttemptClaim | null> {
   for (let slot = 1; slot <= SMS_VERIFY_MAX_FAILED_ATTEMPTS; slot++) {
-    if (
-      await getMfaBackend().setIfNotExists(
-        smsVerifyAttemptSlotKey(phone, purpose, slot),
-        "1",
-        SMS_VERIFY_FAILED_ATTEMPT_TTL_MS,
-      )
-    ) {
-      return true;
+    const key = smsVerifyAttemptSlotKey(phone, purpose, slot);
+    const token = `sms-verify-attempt:${randomBytes(16).toString("hex")}`;
+    if (await getMfaBackend().setIfNotExists(key, token, SMS_VERIFY_FAILED_ATTEMPT_TTL_MS)) {
+      return { key, token };
     }
   }
-  return false;
+  return null;
+}
+
+/** Release only the exact slot generation claimed by this request. */
+export async function releaseSmsVerifyAttempt(claim: SmsVerifyAttemptClaim): Promise<boolean> {
+  try {
+    return await getMfaBackend().compareDelete(claim.key, claim.token);
+  } catch {
+    // Rollback is best-effort and generation-exact. A storage outage keeps the
+    // slot consumed (fail closed) without replacing the original provider error.
+    return false;
+  }
+}
+
+/**
+ * Roll back claim-first accounting only when no provider check could have run.
+ * Timeout/5xx/malformed outcomes retain the slot because the remote service may
+ * already have evaluated the guess.
+ */
+export async function releaseUnattemptedSmsVerifyClaim(
+  claim: SmsVerifyAttemptClaim,
+  error: unknown,
+): Promise<boolean> {
+  if (
+    !(error instanceof SmsChallengeInProgressError) &&
+    !(error instanceof SmsVerificationNotAttemptedError)
+  ) {
+    return false;
+  }
+  return releaseSmsVerifyAttempt(claim);
 }
 
 export async function recordSmsVerifyFailure(phone: string, purpose: string): Promise<void> {
@@ -1143,12 +1182,17 @@ async function rotateRefreshTokenInsideTenant(
     const newRefreshToken = randomBytes(40).toString("hex");
     const newRefreshTokenHash = hashToken(newRefreshToken);
     const successorId = randomBytes(16).toString("hex");
-    const successorExpiresAt = new Date(Date.now() + REFRESH_TOKEN_EXPIRY_DAYS * 86400 * 1000);
+    // Raw SQL parameters do not receive Drizzle's timestamp column encoder.
+    // Keep the driver boundary primitive-only: Neon WebSocket rejects a Date
+    // object before PostgreSQL can execute the rotation function.
+    const successorExpiresAt = new Date(
+      Date.now() + REFRESH_TOKEN_EXPIRY_DAYS * 86400 * 1000,
+    ).toISOString();
     const rotated = bootstrapRows<{ id: string }>(
       await tx.execute(sql`
         SELECT * FROM steward_bootstrap.auth_rotate_refresh_token(
           ${tokenHash}, ${targetTenantId}, ${successorId},
-          ${newRefreshTokenHash}, ${successorExpiresAt.toISOString()}::timestamptz
+          ${newRefreshTokenHash}, ${successorExpiresAt}::timestamptz
         )
       `),
     );
@@ -1375,6 +1419,21 @@ let _authStoreSources: AuthStoreSources = {
   importSession: "memory",
 };
 let _phoneAuth: PhoneAuth | null = null;
+interface RuntimeAuthClientCache {
+  phoneAuth: PhoneAuth | null;
+}
+let _runtimeAuthClients = new WeakMap<object, RuntimeAuthClientCache>();
+
+function runtimeAuthClientCache(): RuntimeAuthClientCache | null {
+  const identity = runtimeEnvironmentIdentity();
+  if (!identity) return null;
+  let cache = _runtimeAuthClients.get(identity);
+  if (!cache) {
+    cache = { phoneAuth: null };
+    _runtimeAuthClients.set(identity, cache);
+  }
+  return cache;
+}
 
 export type AuthStoreSource = "redis" | "postgres" | "memory";
 export type AuthStoreSources = {
@@ -1457,6 +1516,7 @@ export async function initAuthStores(usePostgres = false): Promise<void> {
   _passkeyAuthByRequest = new WeakMap();
   _phoneAuth = null;
   _passkeyAuthWithoutRequest.clear();
+  _runtimeAuthClients = new WeakMap();
   _emailAuthByRequest = new WeakMap();
 }
 
@@ -1535,6 +1595,22 @@ async function peekEmailGrant(grant: string, email: string, tenantId: string): P
   }
 }
 
+/**
+ * Test-only seam for exercising verified-email enrollment routes without
+ * sending or scraping an OTP. Production grants are still issued exclusively
+ * by /email/otp/verify.
+ */
+export async function _seedEmailGrantForTests(
+  grant: string,
+  email: string,
+  tenantId: string,
+): Promise<void> {
+  await getEmailGrantStore().set(
+    emailGrantKey(grant),
+    JSON.stringify({ email: email.toLowerCase().trim(), tenantId }),
+  );
+}
+
 const OAUTH_CODE_REDEEM_LOCK_TTL_MS = 10 * 1000;
 const OAUTH_CODE_REDEEM_LOCK_CLEANUP_TIMEOUT_MS = 250;
 
@@ -1590,7 +1666,7 @@ async function markOidcIdTokenUsedOnce(
   return inserted ? { ok: true } : { ok: false, response: "replayed" };
 }
 
-function isUnsafeUnboundOAuthProviderCodeExchangeAllowed(): boolean {
+export function isUnsafeUnboundOAuthProviderCodeExchangeAllowed(): boolean {
   return runtimeEnvironmentValue("STEWARD_ALLOW_UNBOUND_OAUTH_PROVIDER_CODE_EXCHANGE") === "true";
 }
 
@@ -2008,10 +2084,50 @@ function buildTemplateRenderers(templates: TenantEmailConfig["templates"]): {
   };
 }
 
+function globalEmailMagicLinkBaseUrl(): string {
+  const emailBaseUrl = runtimeEnvironmentValue("EMAIL_MAGIC_LINK_BASE_URL")?.trim();
+  if (emailBaseUrl) {
+    const parsed = new URL(emailBaseUrl);
+    const normalized = emailBaseUrl.replace(/\/$/, "");
+    if (
+      !["http:", "https:"].includes(parsed.protocol) ||
+      parsed.username ||
+      parsed.password ||
+      parsed.search ||
+      parsed.hash ||
+      parsed.origin !== normalized
+    ) {
+      throw new Error("EMAIL_MAGIC_LINK_BASE_URL must be a credential-free HTTP(S) origin");
+    }
+    return parsed.origin;
+  }
+
+  return runtimeEnvironmentValue("APP_URL")?.trim().replace(/\/$/, "") || "https://steward.fi";
+}
+
+function globalEmailMagicLinkCallbackPath(): string | undefined {
+  const callbackPath = runtimeEnvironmentValue("EMAIL_MAGIC_LINK_CALLBACK_PATH")?.trim();
+  if (!callbackPath) return undefined;
+  if (!callbackPath.startsWith("/") || callbackPath.startsWith("//")) {
+    throw new Error("EMAIL_MAGIC_LINK_CALLBACK_PATH must be a root-relative path");
+  }
+  return callbackPath;
+}
+
+function globalEmailBrandName(): string | undefined {
+  const brandName = runtimeEnvironmentValue("EMAIL_BRAND_NAME")?.trim();
+  if (!brandName) return undefined;
+  if (brandName.length > 100 || /[\r\n]/.test(brandName)) {
+    throw new Error("EMAIL_BRAND_NAME must be a single-line string of at most 100 characters");
+  }
+  return brandName;
+}
+
 function buildGlobalEmailAuth(overrides?: {
   baseUrl?: string;
   callbackPath?: string;
   templateId?: string;
+  brandName?: string;
   subjectOverride?: string;
   replyTo?: string;
   templates?: TenantEmailConfig["templates"];
@@ -2030,15 +2146,13 @@ function buildGlobalEmailAuth(overrides?: {
 
   return new EmailAuth({
     from: emailFrom,
-    baseUrl:
-      overrides?.baseUrl?.replace(/\/$/, "") ||
-      runtimeEnvironmentValue("APP_URL") ||
-      "https://steward.fi",
-    callbackPath: overrides?.callbackPath,
+    baseUrl: overrides?.baseUrl?.replace(/\/$/, "") || globalEmailMagicLinkBaseUrl(),
+    callbackPath: overrides?.callbackPath || globalEmailMagicLinkCallbackPath(),
     provider,
     tokenStore: getTokenStore(),
     codeVerifierSecret: runtimeEnvironmentValue("STEWARD_EMAIL_CODE_SECRET"),
     templateId: overrides?.templateId,
+    brandName: overrides?.brandName || globalEmailBrandName(),
     subjectOverride: overrides?.subjectOverride,
     replyTo: overrides?.replyTo,
     ...buildTemplateRenderers(overrides?.templates),
@@ -2097,6 +2211,7 @@ async function createEmailAuthForTenant(tenantId: string): Promise<EmailAuth> {
       baseUrl: magicLinkBaseUrl,
       callbackPath,
       templateId: emailConfig?.templateId,
+      brandName: emailConfig?.brandName,
       subjectOverride: emailConfig?.subjectOverride,
       replyTo: emailConfig?.replyTo,
       templates: emailConfig?.templates,
@@ -2118,19 +2233,17 @@ async function createEmailAuthForTenant(tenantId: string): Promise<EmailAuth> {
         })
       : undefined;
 
-  const baseUrl =
-    magicLinkBaseUrl?.replace(/\/$/, "") ||
-    runtimeEnvironmentValue("APP_URL") ||
-    "https://steward.fi";
+  const baseUrl = magicLinkBaseUrl?.replace(/\/$/, "") || globalEmailMagicLinkBaseUrl();
 
   return new EmailAuth({
     from,
     baseUrl,
-    callbackPath,
+    callbackPath: callbackPath || globalEmailMagicLinkCallbackPath(),
     provider,
     tokenStore: getTokenStore(),
     codeVerifierSecret: runtimeEnvironmentValue("STEWARD_EMAIL_CODE_SECRET"),
     templateId: emailConfig.templateId,
+    brandName: emailConfig.brandName || globalEmailBrandName(),
     subjectOverride: emailConfig.subjectOverride,
     replyTo: emailConfig.replyTo,
     ...buildTemplateRenderers(emailConfig.templates),
@@ -2921,38 +3034,72 @@ async function requireRecentFactorEnrollmentStepUp(
 }
 
 export function getPhoneAuth(): PhoneAuth {
-  if (_phoneAuth) return _phoneAuth;
+  const runtimeCache = runtimeAuthClientCache();
+  const cached = runtimeCache?.phoneAuth ?? _phoneAuth;
+  if (cached) return cached;
 
   let provider: SmsProvider | undefined;
-  if (process.env.SMS_PROVIDER === "mock" && process.env.NODE_ENV !== "production") {
-    provider = new MockSmsProvider();
-  } else if (
-    process.env.TWILIO_ACCOUNT_SID &&
-    process.env.TWILIO_AUTH_TOKEN &&
-    process.env.TWILIO_FROM
+  let managedProvider: ManagedSmsOtpProvider | undefined;
+  if (
+    runtimeEnvironmentValue("SMS_PROVIDER") === "mock" &&
+    runtimeEnvironmentValue("NODE_ENV") !== "production"
   ) {
-    provider = new TwilioSmsProvider({
-      accountSid: process.env.TWILIO_ACCOUNT_SID,
-      authToken: process.env.TWILIO_AUTH_TOKEN,
-      from: process.env.TWILIO_FROM,
-    });
-  } else if (process.env.NODE_ENV === "production") {
-    throw new Error("SMS provider not configured");
+    provider = new MockSmsProvider();
+  } else {
+    managedProvider = buildTwilioVerifyProviderFromEnvironment();
+    if (
+      !managedProvider &&
+      runtimeEnvironmentValue("TWILIO_ACCOUNT_SID") &&
+      runtimeEnvironmentValue("TWILIO_AUTH_TOKEN") &&
+      runtimeEnvironmentValue("TWILIO_FROM")
+    ) {
+      provider = new TwilioSmsProvider({
+        accountSid: runtimeEnvironmentValue("TWILIO_ACCOUNT_SID") as string,
+        authToken: runtimeEnvironmentValue("TWILIO_AUTH_TOKEN") as string,
+        from: runtimeEnvironmentValue("TWILIO_FROM") as string,
+      });
+    } else if (!managedProvider && runtimeEnvironmentValue("NODE_ENV") === "production") {
+      throw new Error("SMS provider not configured");
+    }
   }
 
-  _phoneAuth = new PhoneAuth({
+  const phoneAuth = new PhoneAuth({
     provider,
+    managedProvider,
     tokenStore: new TokenStore({ backend: getMfaBackend() }),
   });
-  return _phoneAuth;
+  if (runtimeCache) runtimeCache.phoneAuth = phoneAuth;
+  else _phoneAuth = phoneAuth;
+  return phoneAuth;
+}
+
+function buildTwilioVerifyProviderFromEnvironment(
+  env: NodeJS.ProcessEnv = process.env,
+): TwilioVerifyProvider | undefined {
+  const verifyConfigured =
+    env.TWILIO_VERIFY_SERVICE_SID !== undefined ||
+    env.TWILIO_VERIFY_TOKEN_TTL_SECONDS !== undefined;
+  if (!verifyConfigured) return undefined;
+  return new TwilioVerifyProvider({
+    accountSid: env.TWILIO_ACCOUNT_SID ?? "",
+    authToken: env.TWILIO_AUTH_TOKEN ?? "",
+    serviceSid: env.TWILIO_VERIFY_SERVICE_SID ?? "",
+    tokenTtlSeconds: Number(env.TWILIO_VERIFY_TOKEN_TTL_SECONDS),
+  });
+}
+
+/** Fail app construction before health/readiness can accept malformed Verify config. */
+export function validatePhoneAuthProviderEnvironment(env: NodeJS.ProcessEnv = process.env): void {
+  if (env.SMS_PROVIDER === "mock" && env.NODE_ENV !== "production") return;
+  buildTwilioVerifyProviderFromEnvironment(env);
 }
 
 function isWhatsAppOtpEnabled(): boolean {
-  return process.env.WHATSAPP_OTP_ENABLED === "true";
+  return runtimeEnvironmentValue("WHATSAPP_OTP_ENABLED") === "true";
 }
 
 function isFarcasterLoginEnabled(): boolean {
-  return process.env.FARCASTER_LOGIN_ENABLED === "true";
+  return runtimeEnvironmentValue("FARCASTER_LOGIN_ENABLED") === "true";
 }
 
 const TELEGRAM_LOGIN_MAX_AGE_SEC = 24 * 60 * 60;
@@ -3201,8 +3348,14 @@ class MfaRecoveryCodeStore implements RecoveryCodeStore {
   }
 }
 
-const recoveryCodeStore: RecoveryCodeStore =
-  process.env.NODE_ENV === "test" ? new InMemoryRecoveryCodeStore() : new MfaRecoveryCodeStore();
+const durableRecoveryCodeStore: RecoveryCodeStore = new MfaRecoveryCodeStore();
+const testRecoveryCodeStore: RecoveryCodeStore = new InMemoryRecoveryCodeStore();
+
+function getRecoveryCodeStore(): RecoveryCodeStore {
+  return runtimeEnvironmentValue("NODE_ENV") === "test"
+    ? testRecoveryCodeStore
+    : durableRecoveryCodeStore;
+}
 
 type PendingMfaAuth = {
   mfaType: "totp" | "sms";
@@ -3342,6 +3495,7 @@ async function buildAuthOrMfaResponse(
     const { expiresAt } = await getPhoneAuth().sendOtp(
       smsMfa.phone,
       smsMfaChallengePurpose(challenge.challengeId),
+      "sms",
     );
     return {
       ok: true,
@@ -4121,10 +4275,9 @@ function resolveSamlMappedRole(config: TenantSamlSsoConfig, groups: string[]): s
 }
 
 function getEmailAuthRedirectBaseUrl(): string {
-  return (process.env.EMAIL_AUTH_REDIRECT_BASE_URL || "https://www.elizacloud.ai").replace(
-    /\/$/,
-    "",
-  );
+  return (
+    runtimeEnvironmentValue("EMAIL_AUTH_REDIRECT_BASE_URL") || "https://www.elizacloud.ai"
+  ).replace(/\/$/, "");
 }
 
 function buildEmailAuthRedirectUrl(params?: Record<string, string | undefined>): string {
@@ -4775,7 +4928,8 @@ auth.get("/providers", async (c) => {
     discord: enabledOauth.includes("discord"),
     github: enabledOauth.includes("github"),
     twitter: enabledOauth.includes("twitter"),
-    telegram: methodEnabled("telegram") && Boolean(process.env.TELEGRAM_BOT_TOKEN?.trim()),
+    telegram:
+      methodEnabled("telegram") && Boolean(runtimeEnvironmentValue("TELEGRAM_BOT_TOKEN")?.trim()),
     farcaster: methodEnabled("farcaster") && isFarcasterLoginEnabled(),
     linkedin: enabledOauth.includes("linkedin"),
     spotify: enabledOauth.includes("spotify"),
@@ -4804,7 +4958,7 @@ auth.post("/telegram/challenge", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
   }
 
-  const botToken = process.env.TELEGRAM_BOT_TOKEN?.trim();
+  const botToken = runtimeEnvironmentValue("TELEGRAM_BOT_TOKEN")?.trim();
   if (!botToken) {
     return c.json<ApiResponse>({ ok: false, error: "Telegram login is not configured" }, 503);
   }
@@ -4847,7 +5001,7 @@ auth.post("/telegram/verify", async (c) => {
   >(c);
   if (!body) return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
 
-  const botToken = process.env.TELEGRAM_BOT_TOKEN?.trim();
+  const botToken = runtimeEnvironmentValue("TELEGRAM_BOT_TOKEN")?.trim();
   if (!botToken) {
     return c.json<ApiResponse>({ ok: false, error: "Telegram login is not configured" }, 503);
   }
@@ -5675,8 +5829,8 @@ auth.get("/test/inbox/:email", (c) => {
 
 auth.get("/test/sms-inbox/:phone", (c) => {
   if (
-    process.env.SMS_PROVIDER !== "mock" ||
-    process.env.NODE_ENV === "production" ||
+    runtimeEnvironmentValue("SMS_PROVIDER") !== "mock" ||
+    runtimeEnvironmentValue("NODE_ENV") === "production" ||
     !authTestInboxEnabled()
   ) {
     return c.json<ApiResponse>({ ok: false, error: "Not found" }, 404);
@@ -5713,8 +5867,8 @@ auth.post("/test/token", async (c) => {
   // supervised app-review / automation windows and disable it immediately
   // afterward. Never leave it enabled on an internet-reachable prod deploy.
   if (
-    process.env.NODE_ENV === "production" &&
-    process.env.STEWARD_ENABLE_PROD_TEST_ACCOUNT_TOKEN !== "true"
+    runtimeEnvironmentValue("NODE_ENV") === "production" &&
+    runtimeEnvironmentValue("STEWARD_ENABLE_PROD_TEST_ACCOUNT_TOKEN") !== "true"
   ) {
     return c.json<ApiResponse>(
       { ok: false, error: "Test account token exchange is disabled" },
@@ -5899,7 +6053,11 @@ auth.post("/sms/send", async (c) => {
 
   let expiresAt: Date;
   try {
-    ({ expiresAt } = await getPhoneAuth().sendOtp(body.phone, smsLoginPurpose(resolvedTenantId)));
+    ({ expiresAt } = await getPhoneAuth().sendOtp(
+      body.phone,
+      smsLoginPurpose(resolvedTenantId),
+      "sms",
+    ));
   } catch (err) {
     if (err instanceof Error && err.message === "SMS provider not configured") {
       return c.json<ApiResponse>({ ok: false, error: "SMS provider not configured" }, 503);
@@ -5942,7 +6100,8 @@ auth.post("/sms/verify", async (c) => {
   // Claim-first: atomically consume one attempt slot BEFORE verifying, so
   // concurrent requests cannot both pass a check-then-record boundary and
   // stretch the attempt budget (~2x under a race).
-  if (!(await claimSmsVerifyAttempt(body.phone, otpPurpose))) {
+  const attemptClaim = await claimSmsVerifyAttempt(body.phone, otpPurpose);
+  if (!attemptClaim) {
     return c.json<ApiResponse>(
       {
         ok: false,
@@ -5952,7 +6111,13 @@ auth.post("/sms/verify", async (c) => {
     );
   }
 
-  const result = await getPhoneAuth().verifyOtp(body.phone, body.code, otpPurpose);
+  let result: Awaited<ReturnType<PhoneAuth["verifyOtp"]>>;
+  try {
+    result = await getPhoneAuth().verifyOtp(body.phone, body.code, otpPurpose);
+  } catch (error) {
+    await releaseUnattemptedSmsVerifyClaim(attemptClaim, error);
+    throw error;
+  }
   if (!result.valid) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired code" }, 401);
   }
@@ -6066,6 +6231,7 @@ auth.post("/whatsapp/send", async (c) => {
     ({ expiresAt } = await getPhoneAuth().sendOtp(
       body.phone,
       whatsappLoginPurpose(resolvedTenantId),
+      "whatsapp",
     ));
   } catch (err) {
     if (err instanceof Error && err.message === "SMS provider not configured") {
@@ -6113,7 +6279,8 @@ auth.post("/whatsapp/verify", async (c) => {
   // Claim-first: atomically consume one attempt slot BEFORE verifying, so
   // concurrent requests cannot both pass a check-then-record boundary and
   // stretch the attempt budget (~2x under a race).
-  if (!(await claimSmsVerifyAttempt(body.phone, otpPurpose))) {
+  const attemptClaim = await claimSmsVerifyAttempt(body.phone, otpPurpose);
+  if (!attemptClaim) {
     return c.json<ApiResponse>(
       {
         ok: false,
@@ -6123,7 +6290,13 @@ auth.post("/whatsapp/verify", async (c) => {
     );
   }
 
-  const result = await getPhoneAuth().verifyOtp(body.phone, body.code, otpPurpose);
+  let result: Awaited<ReturnType<PhoneAuth["verifyOtp"]>>;
+  try {
+    result = await getPhoneAuth().verifyOtp(body.phone, body.code, otpPurpose);
+  } catch (error) {
+    await releaseUnattemptedSmsVerifyClaim(attemptClaim, error);
+    throw error;
+  }
   if (!result.valid) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired code" }, 401);
   }
@@ -6441,17 +6614,13 @@ auth.post("/verify", async (c) => {
     },
   );
 
-  await writeAuditEvent({
-    tenantId: effectiveTenantId,
-    actorType: "user",
-    actorId: user.id,
-    action: "auth.login",
-    resourceType: "session",
-    metadata: { method: "siwe", address, walletChain: "ethereum" },
-    ipAddress: c.req.header("x-forwarded-for") ?? null,
-    userAgent: c.req.header("user-agent") ?? null,
-    requestId: c.get("requestId") ?? null,
-  });
+  await writeAuthLoginAudit(
+    c,
+    effectiveTenantId,
+    user.id,
+    { authMethod: "siwe" },
+    { address, walletChain: "ethereum" },
+  );
 
   responseData.userId = user.id;
   responseData.address = address;
@@ -7039,7 +7208,7 @@ auth.post("/mfa/totp/enroll", async (c) => {
   const secret = generateTotpSecret();
   const accountName =
     session.payload.email || session.payload.address || `user:${session.payload.userId}`;
-  const issuer = process.env.TOTP_ISSUER || "Steward";
+  const issuer = runtimeEnvironmentValue("TOTP_ISSUER") || "Steward";
 
   await writeMfaJson(
     mfaKey("totp:pending", session.payload.userId),
@@ -7117,7 +7286,10 @@ auth.post("/mfa/totp/verify", async (c) => {
     });
     await writeMfaJson(mfaKey("totp:enabled", session.payload.userId), stored);
     await getMfaBackend().delete(mfaKey("totp:pending", session.payload.userId));
-    const recoveryCodes = await generateRecoveryCodes(recoveryCodeStore, session.payload.userId);
+    const recoveryCodes = await generateRecoveryCodes(
+      getRecoveryCodeStore(),
+      session.payload.userId,
+    );
     const { issuedBefore } = await revokeUserRefreshSessions(session.payload.userId);
     await writeAuditEvent({
       tenantId: session.payload.tenantId,
@@ -7216,7 +7388,7 @@ auth.post("/mfa/totp/complete", async (c) => {
     // the pending login retryable; a valid code is burned only after this
     // request atomically wins the challenge claim.
     const recoveryCode = await findUnusedRecoveryCode(
-      recoveryCodeStore,
+      getRecoveryCodeStore(),
       challenge.userId,
       body.recoveryCode ?? "",
     );
@@ -7227,7 +7399,7 @@ auth.post("/mfa/totp/complete", async (c) => {
     if ((await getMfaBackend().consume(challengeKey)) === null) {
       return c.json<ApiResponse>({ ok: false, error: "Invalid or expired MFA challenge" }, 401);
     }
-    if (!(await recoveryCodeStore.markUsed(recoveryCode.id, new Date()))) {
+    if (!(await getRecoveryCodeStore().markUsed(recoveryCode.id, new Date()))) {
       return c.json<ApiResponse>({ ok: false, error: "Invalid code" }, 401);
     }
     method = "recovery_code";
@@ -7310,7 +7482,7 @@ auth.post("/mfa/totp/step-up", async (c) => {
   let method: "totp" | "recovery_code" = "totp";
   if (hasRecoveryCode) {
     const verified = await verifyRecoveryCode(
-      recoveryCodeStore,
+      getRecoveryCodeStore(),
       session.payload.userId,
       body?.recoveryCode ?? "",
     );
@@ -7341,7 +7513,7 @@ auth.get("/mfa/recovery-codes/status", async (c) => {
 
   const enabled = await hasTotpEnabled(session.payload.userId);
   const remaining = enabled
-    ? await unusedRecoveryCodeCount(recoveryCodeStore, session.payload.userId)
+    ? await unusedRecoveryCodeCount(getRecoveryCodeStore(), session.payload.userId)
     : 0;
   return c.json({ ok: true, enabled, remaining });
 });
@@ -7394,7 +7566,7 @@ auth.post("/mfa/recovery-codes/regenerate", async (c) => {
     ...verified.stored,
     lastAcceptedStep: verified.acceptedStep,
   });
-  const recoveryCodes = await generateRecoveryCodes(recoveryCodeStore, session.payload.userId);
+  const recoveryCodes = await generateRecoveryCodes(getRecoveryCodeStore(), session.payload.userId);
   await writeAuditEvent({
     tenantId: session.payload.tenantId,
     actorType: "user",
@@ -7474,6 +7646,7 @@ auth.post("/mfa/sms/enroll", async (c) => {
     ({ expiresAt } = await getPhoneAuth().sendOtp(
       body.phone,
       smsMfaEnrollPurpose(session.payload.userId),
+      "sms",
     ));
   } catch (err) {
     if (err instanceof Error && err.message === "SMS provider not configured") {
@@ -7528,14 +7701,21 @@ auth.post("/mfa/sms/verify", async (c) => {
   const pendingPurpose = pending.purpose ?? smsMfaEnrollPurpose(session.payload.userId);
   // Claim-first: atomically consume one attempt slot BEFORE verifying, so
   // concurrent requests cannot both pass a check-then-record boundary.
-  if (!(await claimSmsVerifyAttempt(pending.phone, pendingPurpose))) {
+  const attemptClaim = await claimSmsVerifyAttempt(pending.phone, pendingPurpose);
+  if (!attemptClaim) {
     return c.json<ApiResponse>(
       { ok: false, error: "Too many invalid SMS verification attempts. Request a new code." },
       429,
     );
   }
 
-  const verified = await getPhoneAuth().verifyOtp(pending.phone, body.code, pendingPurpose);
+  let verified: Awaited<ReturnType<PhoneAuth["verifyOtp"]>>;
+  try {
+    verified = await getPhoneAuth().verifyOtp(pending.phone, body.code, pendingPurpose);
+  } catch (error) {
+    await releaseUnattemptedSmsVerifyClaim(attemptClaim, error);
+    throw error;
+  }
   if (!verified.valid) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired code" }, 401);
   }
@@ -7608,6 +7788,7 @@ auth.post("/mfa/sms/send", async (c) => {
     ({ expiresAt } = await getPhoneAuth().sendOtp(
       smsMfa.phone,
       smsMfaManagePurpose(session.payload.userId),
+      "sms",
     ));
   } catch (err) {
     if (err instanceof Error && err.message === "SMS provider not configured") {
@@ -7656,7 +7837,8 @@ auth.post("/mfa/sms/complete", async (c) => {
   const otpPurpose = smsMfaChallengePurpose(body.challengeId);
   // Claim-first: atomically consume one attempt slot BEFORE verifying, so
   // concurrent requests cannot both pass a check-then-record boundary.
-  if (!(await claimSmsVerifyAttempt(smsMfa.phone, otpPurpose))) {
+  const attemptClaim = await claimSmsVerifyAttempt(smsMfa.phone, otpPurpose);
+  if (!attemptClaim) {
     return c.json<ApiResponse>(
       {
         ok: false,
@@ -7666,7 +7848,13 @@ auth.post("/mfa/sms/complete", async (c) => {
     );
   }
 
-  const verified = await getPhoneAuth().verifyOtp(smsMfa.phone, body.code, otpPurpose);
+  let verified: Awaited<ReturnType<PhoneAuth["verifyOtp"]>>;
+  try {
+    verified = await getPhoneAuth().verifyOtp(smsMfa.phone, body.code, otpPurpose);
+  } catch (error) {
+    await releaseUnattemptedSmsVerifyClaim(attemptClaim, error);
+    throw error;
+  }
   if (!verified.valid) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired code" }, 401);
   }
@@ -7726,14 +7914,21 @@ auth.post("/mfa/sms/step-up", async (c) => {
   const otpPurpose = smsMfaManagePurpose(session.payload.userId);
   // Claim-first: atomically consume one attempt slot BEFORE verifying, so
   // concurrent requests cannot both pass a check-then-record boundary.
-  if (!(await claimSmsVerifyAttempt(smsMfa.phone, otpPurpose))) {
+  const attemptClaim = await claimSmsVerifyAttempt(smsMfa.phone, otpPurpose);
+  if (!attemptClaim) {
     return c.json<ApiResponse>(
       { ok: false, error: "Too many invalid SMS verification attempts. Request a new code." },
       429,
     );
   }
 
-  const verified = await getPhoneAuth().verifyOtp(smsMfa.phone, body.code, otpPurpose);
+  let verified: Awaited<ReturnType<PhoneAuth["verifyOtp"]>>;
+  try {
+    verified = await getPhoneAuth().verifyOtp(smsMfa.phone, body.code, otpPurpose);
+  } catch (error) {
+    await releaseUnattemptedSmsVerifyClaim(attemptClaim, error);
+    throw error;
+  }
   if (!verified.valid) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired code" }, 401);
   }
@@ -7764,26 +7959,31 @@ auth.post("/mfa/passkey/options", async (c) => {
   );
   if (methodResponse) return methodResponse;
 
+  const passkeyAuth = getPasskeyAuth(c.req.header("origin"));
   const passkeys = await getDb()
     .select({
       credentialId: authenticators.credentialId,
+      rpId: authenticators.rpId,
       transports: authenticators.transports,
     })
     .from(authenticators)
     .where(eq(authenticators.userId, session.payload.userId));
-  if (passkeys.length === 0) {
+  // Explicitly cross-RP credentials cannot satisfy this RP's WebAuthn
+  // challenge. Legacy NULL provenance stays eligible so the browser can
+  // adjudicate it, and a successful assertion will safely backfill the RP.
+  const eligiblePasskeys = passkeys.filter(
+    (credential) => credential.rpId === null || credential.rpId === passkeyAuth.rpID,
+  );
+  if (eligiblePasskeys.length === 0) {
     return c.json<ApiResponse>({ ok: false, error: "No passkey is registered for this user" }, 404);
   }
 
-  const options = await getPasskeyAuth(c.req.header("origin")).generateAuthenticationOptions(
-    `mfa:${session.payload.userId}`,
-    {
-      allowCredentials: passkeys.map((credential) => ({
-        id: credential.credentialId,
-        transports: (credential.transports ?? []) as never[],
-      })),
-    },
-  );
+  const options = await passkeyAuth.generateAuthenticationOptions(`mfa:${session.payload.userId}`, {
+    allowCredentials: eligiblePasskeys.map((credential) => ({
+      id: credential.credentialId,
+      transports: (credential.transports ?? []) as never[],
+    })),
+  });
   const challengeId = options.challenge;
   await getChallengeStore().set(
     passkeyMfaChallengeKey(session.payload.userId, challengeId),
@@ -7839,6 +8039,11 @@ const completePasskeyMfaHandler = async (c: Context) => {
     return c.json<ApiResponse>({ ok: false, error: "Passkey MFA verification failed" }, 401);
   }
 
+  const passkeyAuth = getPasskeyAuth(c.req.header("origin"));
+  if (cred.rpId !== null && cred.rpId !== passkeyAuth.rpID) {
+    return c.json<ApiResponse>({ ok: false, error: "Passkey MFA verification failed" }, 401);
+  }
+
   let verification: Awaited<ReturnType<PasskeyAuth["verifyAuthentication"]>>;
   const challengeKey = passkeyMfaChallengeKey(session.payload.userId, body.challengeId);
   let expectedChallenge: string | null = null;
@@ -7847,7 +8052,7 @@ const completePasskeyMfaHandler = async (c: Context) => {
     if (!expectedChallenge) {
       return c.json<ApiResponse>({ ok: false, error: "Invalid or expired passkey challenge" }, 401);
     }
-    verification = await getPasskeyAuth(c.req.header("origin")).verifyAuthentication(
+    verification = await passkeyAuth.verifyAuthentication(
       body.response as unknown as Parameters<PasskeyAuth["verifyAuthentication"]>[0],
       expectedChallenge,
       cred.credentialPublicKey,
@@ -7884,7 +8089,11 @@ const completePasskeyMfaHandler = async (c: Context) => {
 
   const updatedMfaCounters = await getDb()
     .update(authenticators)
-    .set({ counter: verification.authenticationInfo.newCounter })
+    .set({
+      counter: verification.authenticationInfo.newCounter,
+      // A verified assertion proves a legacy credential's RP provenance.
+      ...(cred.rpId === null ? { rpId: passkeyAuth.rpID } : {}),
+    })
     .where(and(eq(authenticators.id, cred.id), eq(authenticators.counter, cred.counter)))
     .returning({ id: authenticators.id });
   if (updatedMfaCounters.length !== 1) {
@@ -7966,7 +8175,8 @@ auth.post("/mfa/sms/unenroll", async (c) => {
   const otpPurpose = smsMfaManagePurpose(session.payload.userId);
   // Claim-first: atomically consume one attempt slot BEFORE verifying, so
   // concurrent requests cannot both pass a check-then-record boundary.
-  if (!(await claimSmsVerifyAttempt(smsMfa.phone, otpPurpose))) {
+  const attemptClaim = await claimSmsVerifyAttempt(smsMfa.phone, otpPurpose);
+  if (!attemptClaim) {
     return c.json<ApiResponse>(
       {
         ok: false,
@@ -7975,7 +8185,13 @@ auth.post("/mfa/sms/unenroll", async (c) => {
       429,
     );
   }
-  const verified = await getPhoneAuth().verifyOtp(smsMfa.phone, body.code, otpPurpose);
+  let verified: Awaited<ReturnType<PhoneAuth["verifyOtp"]>>;
+  try {
+    verified = await getPhoneAuth().verifyOtp(smsMfa.phone, body.code, otpPurpose);
+  } catch (error) {
+    await releaseUnattemptedSmsVerifyClaim(attemptClaim, error);
+    throw error;
+  }
   if (!verified.valid) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired code" }, 401);
   }
@@ -8375,8 +8591,9 @@ auth.delete("/sessions", async (c) => {
 
 /**
  * POST /passkey/register/options
- * Body: { email }
- * Finds or creates user, returns WebAuthn registration options.
+ * Body: { email, emailGrant? }
+ * Verified-email enrollment returns 409 when the account already has a
+ * passkey for this RP, while authenticated sessions can add devices.
  */
 auth.post("/passkey/register/options", async (c) => {
   // Pre-auth reachable via the email-grant path — rate limit like the other
@@ -8399,6 +8616,9 @@ auth.post("/passkey/register/options", async (c) => {
   }
   const email = body.email.toLowerCase().trim();
   const db = getDb();
+  const emailGrant =
+    typeof body.emailGrant === "string" && body.emailGrant.length > 0 ? body.emailGrant : null;
+  const usingEmailGrant = emailGrant !== null;
 
   // Two ways in: an authenticated session (add-passkey for logged-in users)
   // or a verified-email grant from /email/otp/verify (Privy-style signup:
@@ -8408,14 +8628,14 @@ auth.post("/passkey/register/options", async (c) => {
   let userEmail: string | null;
   let ssoTenantId: string;
 
-  if (typeof body.emailGrant === "string" && body.emailGrant.length > 0) {
+  if (emailGrant !== null) {
     const resolvedTenantId =
       c.req.header("X-Steward-Tenant")?.trim() || body.tenantId?.trim() || defaultAuthTenantId();
     const methodResponse = await requireTenantLoginMethodAllowed(c, resolvedTenantId, "passkey");
     if (methodResponse) return methodResponse;
     // Peek (not consume): the grant is only burned at register/verify so a
     // cancelled Touch ID prompt doesn't cost the user their verification.
-    const grantOk = await peekEmailGrant(body.emailGrant, email, resolvedTenantId);
+    const grantOk = await peekEmailGrant(emailGrant, email, resolvedTenantId);
     if (!grantOk) {
       return c.json<ApiResponse>({ ok: false, error: "Invalid or expired email grant" }, 401);
     }
@@ -8467,20 +8687,44 @@ auth.post("/passkey/register/options", async (c) => {
   );
   if (ssoRequiredResponse) return ssoRequiredResponse;
 
+  const passkeyAuth = getPasskeyAuth(c.req.header("origin"));
   const existingCreds = await db
-    .select({ credentialId: authenticators.credentialId })
+    .select({
+      credentialId: authenticators.credentialId,
+      rpId: authenticators.rpId,
+    })
     .from(authenticators)
     .where(eq(authenticators.userId, userId));
+
+  // The verified-email path exists to establish the account's first passkey.
+  // Only provenance that explicitly matches the current RP can trigger the
+  // recovery signal. A cross-RP credential must not block registration here,
+  // and a legacy NULL row is ambiguous: keep it in excludeCredentials so the
+  // browser can safely adjudicate whether it belongs to this RP.
+  if (usingEmailGrant && existingCreds.some((cred) => cred.rpId === passkeyAuth.rpID)) {
+    return c.json<ApiResponse & { code: "passkey_already_registered" }>(
+      {
+        ok: false,
+        error: "A passkey already exists for this email. Sign in with it instead.",
+        code: "passkey_already_registered",
+      },
+      409,
+    );
+  }
+
+  const sameOrLegacyCreds = existingCreds.filter(
+    (cred) => cred.rpId === null || cred.rpId === passkeyAuth.rpID,
+  );
 
   const attachment =
     body.authenticatorAttachment === "platform" || body.authenticatorAttachment === "cross-platform"
       ? body.authenticatorAttachment
       : undefined;
 
-  const options = await getPasskeyAuth(c.req.header("origin")).generateRegistrationOptions(
+  const options = await passkeyAuth.generateRegistrationOptions(
     userId,
     userEmail ?? email,
-    existingCreds.map((cred) => cred.credentialId),
+    sameOrLegacyCreds.map((cred) => cred.credentialId),
     attachment ? { authenticatorAttachment: attachment } : undefined,
   );
 
@@ -8581,9 +8825,10 @@ auth.post("/passkey/register/verify", async (c) => {
   const ssoRequiredResponse = await requireNonSsoEmailLoginAllowed(c, tenantId, email, "Passkey");
   if (ssoRequiredResponse) return ssoRequiredResponse;
 
+  const passkeyAuth = getPasskeyAuth(c.req.header("origin"));
   let verification: Awaited<ReturnType<PasskeyAuth["verifyRegistration"]>>;
   try {
-    verification = await getPasskeyAuth(c.req.header("origin")).verifyRegistration(
+    verification = await passkeyAuth.verifyRegistration(
       user.id,
       body.response as unknown as Parameters<PasskeyAuth["verifyRegistration"]>[1],
     );
@@ -8623,6 +8868,7 @@ auth.post("/passkey/register/verify", async (c) => {
       userId: user.id,
       credentialId: credential.id,
       credentialPublicKey: uint8ArrayToBase64url(credential.publicKey),
+      rpId: passkeyAuth.rpID,
       counter: credential.counter,
       credentialDeviceType,
       credentialBackedUp,
@@ -8775,6 +9021,11 @@ auth.post("/passkey/login/verify", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Passkey authentication failed" }, 401);
   }
 
+  const passkeyAuth = getPasskeyAuth(c.req.header("origin"));
+  if (cred.rpId !== null && cred.rpId !== passkeyAuth.rpID) {
+    return c.json<ApiResponse>({ ok: false, error: "Passkey authentication failed" }, 401);
+  }
+
   let verification: Awaited<ReturnType<PasskeyAuth["verifyAuthentication"]>>;
   try {
     const expectedChallenge = await getChallengeStore().consume(
@@ -8783,7 +9034,7 @@ auth.post("/passkey/login/verify", async (c) => {
     if (!expectedChallenge) {
       return c.json<ApiResponse>({ ok: false, error: "Passkey authentication failed" }, 401);
     }
-    verification = await getPasskeyAuth(c.req.header("origin")).verifyAuthentication(
+    verification = await passkeyAuth.verifyAuthentication(
       body.response as unknown as Parameters<PasskeyAuth["verifyAuthentication"]>[0],
       expectedChallenge,
       cred.credentialPublicKey,
@@ -8818,7 +9069,11 @@ auth.post("/passkey/login/verify", async (c) => {
   // Update counter to prevent replay attacks
   const updatedCounters = await db
     .update(authenticators)
-    .set({ counter: verification.authenticationInfo.newCounter })
+    .set({
+      counter: verification.authenticationInfo.newCounter,
+      // A verified assertion proves a legacy credential's RP provenance.
+      ...(cred.rpId === null ? { rpId: passkeyAuth.rpID } : {}),
+    })
     .where(and(eq(authenticators.id, cred.id), eq(authenticators.counter, cred.counter)))
     .returning({ id: authenticators.id });
   if (updatedCounters.length !== 1) {
@@ -11154,16 +11409,17 @@ async function getAllowedOAuthRedirectEntries(
   const resolvedTenantId = explicitTenantId || defaultAuthTenantId();
   const entries = new Set<string>();
 
+  const clientIdSupplied = clientId !== undefined;
   const normalizedClientId = normalizePublicClientId(clientId);
   const appClientRows = await authAppClientSubjects(resolvedTenantId);
 
-  if (normalizedClientId) {
+  if (clientIdSupplied) {
+    if (!normalizedClientId) return [];
     const client = appClientRows.find((candidate) => candidate.id === normalizedClientId);
-    if (client) {
-      for (const entry of client.allowed_redirect_urls ?? []) {
-        const trimmed = entry.trim();
-        if (trimmed && trimmed !== "*") entries.add(trimmed);
-      }
+    if (!client) return [];
+    for (const entry of client.allowed_redirect_urls ?? []) {
+      const trimmed = entry.trim();
+      if (trimmed && trimmed !== "*") entries.add(trimmed);
     }
     return [...entries];
   }
@@ -11183,7 +11439,12 @@ async function getAllowedOAuthRedirectEntries(
     }
   }
 
-  if (!explicitTenantId) {
+  // Deployment redirects are compatibility authority only when the caller did
+  // not name a tenant, or when an explicit tenant has no redirect authority
+  // records at all. Present-but-empty tenant/client configuration is an
+  // intentional deny and must never inherit the deployment-wide allowlist.
+  const hasTenantRedirectAuthority = config !== null || appClientRows.length > 0;
+  if (!explicitTenantId || !hasTenantRedirectAuthority) {
     for (const entry of parseOAuthRedirectAllowlistEnv()) {
       entries.add(entry);
     }

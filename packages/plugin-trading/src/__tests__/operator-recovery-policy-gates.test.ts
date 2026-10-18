@@ -21,6 +21,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it, mock, setDefaultTimeout } from "bun:test";
+import { createHash } from "node:crypto";
 import {
   agents,
   agentWallets,
@@ -39,6 +40,7 @@ import { z } from "zod";
 import type { StewardAppContext } from "../context";
 
 const PLATFORM_KEY = "stw_platform_test_operator_gates_key";
+const PLATFORM_KEY_HASH = createHash("sha256").update(PLATFORM_KEY).digest("hex");
 const ARBITRUM_CHAIN_ID = 42161;
 // Deterministic stub ETH price for the spending-limit denomination tests.
 const STUB_ETH_USD = 4000;
@@ -107,6 +109,7 @@ mock.module("@stwd/venue-hyperliquid", () => ({
   ]),
   isBuilderPerpSymbol: (coin: string) => /^[a-z0-9]+:[A-Z0-9]+$/.test(coin),
   getMarketableLimitPx: async () => "1",
+  validateBuilderFeeEnv: () => undefined,
 }));
 
 const stubPriceOracle: PriceOracle = {
@@ -185,7 +188,10 @@ async function seedAgent(opts: {
   return { tenantId, agentId };
 }
 
-async function buildApp(ctxOverrides: Partial<StewardAppContext> = {}) {
+async function buildApp(
+  ctxOverrides: Partial<StewardAppContext> = {},
+  options: { memoryRateLimitMaxEntries?: number } = {},
+) {
   const { isValidPlatformKey } = await import("@stwd/auth");
   const { createOperatorRecoveryRoutes } = await import("../routes/operator-recovery");
   const { testCtx } = await import("./_ctx");
@@ -200,9 +206,10 @@ async function buildApp(ctxOverrides: Partial<StewardAppContext> = {}) {
     }
     c.set("tenantId", c.req.header("X-Steward-Tenant") || "default");
     c.set("authType", "platform");
+    c.set("platformKeyHash", PLATFORM_KEY_HASH);
     return next();
   });
-  app.route("/v1/trade", createOperatorRecoveryRoutes({ ...testCtx(), ...ctxOverrides }));
+  app.route("/v1/trade", createOperatorRecoveryRoutes({ ...testCtx(), ...ctxOverrides }, options));
   return app;
 }
 
@@ -312,7 +319,7 @@ describe("SEC-004: usd-send policy gate + caps", () => {
   });
 
   it("fails closed (429) when the process-local rate-limit map is saturated with live windows", async () => {
-    // The fallback map caps at 1_000 keys. Under a distinct-agent flood the
+    // The fallback map is bounded. Under a distinct-agent flood the
     // limiter must deny new keys instead of growing unbounded or resetting
     // live budgets. Agent existence is checked first, so seed the distinct
     // principals that exercise the fallback instead of relying on unknown
@@ -323,13 +330,13 @@ describe("SEC-004: usd-send policy gate + caps", () => {
       ],
     });
     usdSendCalls.length = 0;
-    const app = await buildApp();
+    const app = await buildApp({}, { memoryRateLimitMaxEntries: 2 });
 
     await getDb()
       .insert(agents)
       .values(
-        Array.from({ length: 1_000 }, (_, i) => ({
-          id: i === 999 ? "flood-agent-overflow" : `flood-agent-${i}`,
+        ["flood-agent-0", "flood-agent-overflow"].map((id, i) => ({
+          id,
           tenantId,
           name: `Flood Agent ${i}`,
           walletAddress: "0x1111111111111111111111111111111111111111",
@@ -344,14 +351,13 @@ describe("SEC-004: usd-send policy gate + caps", () => {
     });
     expect(first.status).toBe(200);
 
-    // Fill the remaining 999 slots with distinct keys.
-    for (let i = 0; i < 999; i++) {
-      await postTransfer(app, "usd-send", tenantId, {
-        agentId: `flood-agent-${i}`,
-        destination: DEST_A,
-        amount: "1",
-      });
-    }
+    // Fill the only remaining slot with a distinct key.
+    const flood = await postTransfer(app, "usd-send", tenantId, {
+      agentId: "flood-agent-0",
+      destination: DEST_A,
+      amount: "1",
+    });
+    expect(flood.status).toBe(400);
 
     // The real agent's live window survived the flood: its next call is
     // counted, not reset or dropped.

@@ -79,6 +79,60 @@ async function verifyAgentToken(token: string) {
 }
 
 describe("API access-token revocation", () => {
+  it("returns 401 for unknown and reused refresh tokens", async () => {
+    const unknown = await authRoutes.request("/refresh", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refreshToken: `unknown-${randomUUID()}` }),
+    });
+    expect(unknown.status).toBe(401);
+    expect(await unknown.json()).toEqual({
+      ok: false,
+      error: "Invalid or expired refresh token",
+    });
+
+    const db = getDb();
+    const userId = randomUUID();
+    const tenantId = `tenant-refresh-reuse-${Date.now()}`;
+    const rawRefreshToken = `refresh-reuse-${randomUUID()}`;
+
+    await db.insert(tenants).values({
+      id: tenantId,
+      name: "Refresh Reuse Test Tenant",
+      apiKeyHash: `test-hash-${tenantId}`,
+    });
+    await db.insert(users).values({ id: userId, email: `${userId}@example.com` });
+    await db.insert(userTenants).values({ userId, tenantId, role: "owner" });
+    await db.insert(refreshTokens).values({
+      id: randomUUID(),
+      userId,
+      tenantId,
+      tokenHash: hashSha256Hex(rawRefreshToken),
+      expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+    });
+
+    const firstUse = await authRoutes.request("/refresh", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refreshToken: rawRefreshToken }),
+    });
+    expect(firstUse.status).toBe(200);
+
+    const reused = await authRoutes.request("/refresh", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refreshToken: rawRefreshToken }),
+    });
+    expect(reused.status).toBe(401);
+    expect(await reused.json()).toEqual({
+      ok: false,
+      error: "Refresh token reuse detected. Please sign in again.",
+    });
+
+    const remaining = await db.select().from(refreshTokens);
+    expect(remaining.some((row) => row.userId === userId)).toBe(false);
+  });
+
   it("refresh flow still works without a valid access token", async () => {
     const db = getDb();
     const userId = randomUUID();

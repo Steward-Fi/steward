@@ -63,6 +63,7 @@ import {
   type TenantOidcProviderConfig,
   type TenantTestAccountConfig,
 } from "@stwd/shared";
+import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { type KeyStore, Vault } from "@stwd/vault";
 import {
   and,
@@ -96,7 +97,11 @@ import {
   withPlatformAuthorityTransaction,
 } from "../services/platform-authority-database";
 import { getPolicyRulesValidationError } from "../services/policy-validation";
-import { lockUserSession, lockUserSessions } from "../services/session-lock";
+import {
+  lockPlatformUserAccount,
+  lockUserSession,
+  lockUserSessions,
+} from "../services/session-lock";
 import { TENANT_DEFAULT_POLICIES_RETIREMENT } from "../services/tenant-policy-retirement";
 import {
   createTenantTestAccountConfig,
@@ -458,7 +463,7 @@ async function lockLinkedAccountIdentity(
 }
 
 function platformIdentityMigrationAllowed(): boolean {
-  return process.env.STEWARD_ALLOW_PLATFORM_IDENTITY_MIGRATION === "true";
+  return runtimeEnvironmentValue("STEWARD_ALLOW_PLATFORM_IDENTITY_MIGRATION") === "true";
 }
 
 function platformIdentityMigrationDisabledResponse(c: Context) {
@@ -614,6 +619,13 @@ function isNonEmptyString(value: unknown): value is string {
 
 function isOptionalString(value: unknown): value is string | undefined {
   return value === undefined || isNonEmptyString(value);
+}
+
+function isOptionalEmailBrandName(value: unknown): value is string | undefined {
+  return (
+    value === undefined ||
+    (isNonEmptyString(value) && value.trim().length <= 100 && !/[\u0000-\u001f\u007f]/.test(value))
+  );
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -1424,13 +1436,13 @@ platform.get("/tenants/:id", async (c) => {
 
 /**
  * PATCH /tenants/:tenantId/email-config
- * Body: { apiKey, from, replyTo?, templateId?, subjectOverride?, templates? }
- *   or template-only: { templateId?, subjectOverride?, replyTo?, templates? }
+ * Body: { apiKey, from, replyTo?, brandName?, templateId?, subjectOverride?, templates? }
+ *   or template-only: { brandName?, templateId?, subjectOverride?, replyTo?, templates? }
  *   (no apiKey)
  *
  * Upserts the tenant-specific email provider config. When `apiKey` is
  * omitted the tenant keeps the platform's global Resend provider and only
- * the branding fields (templateId/subjectOverride/replyTo/templates) are
+ * the branding fields (brandName/templateId/subjectOverride/replyTo/templates) are
  * stored — merged over any existing config so magic-link overrides survive.
  * `templates` carries deployer-supplied raw subject/text/html bodies with
  * {{placeholder}} substitution (see TenantEmailConfig.templates); pass
@@ -1455,6 +1467,7 @@ platform.patch("/tenants/:tenantId/email-config", async (c) => {
     apiKey: string;
     from: string;
     replyTo?: string;
+    brandName?: string;
     templateId?: string;
     subjectOverride?: string;
     magicLinkBaseUrl?: string;
@@ -1488,6 +1501,7 @@ platform.patch("/tenants/:tenantId/email-config", async (c) => {
     }
     if (
       !body.templateId &&
+      !body.brandName &&
       !body.subjectOverride &&
       !body.replyTo &&
       !body.magicLinkBaseUrl &&
@@ -1498,7 +1512,7 @@ platform.patch("/tenants/:tenantId/email-config", async (c) => {
         {
           ok: false,
           error:
-            "Provide apiKey+from for provider config, or at least one of templateId, subjectOverride, replyTo, magicLinkBaseUrl, magicLinkCallbackPath, templates",
+            "Provide apiKey+from for provider config, or at least one of brandName, templateId, subjectOverride, replyTo, magicLinkBaseUrl, magicLinkCallbackPath, templates",
         },
         400,
       );
@@ -1509,6 +1523,7 @@ platform.patch("/tenants/:tenantId/email-config", async (c) => {
 
   if (
     !isOptionalString(body.replyTo) ||
+    !isOptionalEmailBrandName(body.brandName) ||
     !isOptionalString(body.templateId) ||
     !isOptionalString(body.subjectOverride) ||
     !isOptionalString(body.magicLinkBaseUrl) ||
@@ -1518,7 +1533,7 @@ platform.patch("/tenants/:tenantId/email-config", async (c) => {
       {
         ok: false,
         error:
-          "replyTo, templateId, subjectOverride, magicLinkBaseUrl, and magicLinkCallbackPath must be non-empty strings",
+          "brandName must be a non-empty single-line string of at most 100 characters; replyTo, templateId, subjectOverride, magicLinkBaseUrl, and magicLinkCallbackPath must be non-empty strings",
       },
       400,
     );
@@ -1561,6 +1576,7 @@ platform.patch("/tenants/:tenantId/email-config", async (c) => {
         apiKeyEncrypted: JSON.stringify(platformKeyStore().encrypt(body.apiKey.trim())),
         from: body.from.trim(),
         ...(body.replyTo ? { replyTo: body.replyTo.trim() } : {}),
+        ...(body.brandName ? { brandName: body.brandName.trim() } : {}),
         ...(body.templateId ? { templateId: body.templateId.trim() } : {}),
         ...(body.subjectOverride ? { subjectOverride: body.subjectOverride.trim() } : {}),
         ...(body.magicLinkBaseUrl ? { magicLinkBaseUrl: body.magicLinkBaseUrl.trim() } : {}),
@@ -1597,6 +1613,7 @@ platform.patch("/tenants/:tenantId/email-config", async (c) => {
         // authoritative committed config without clobbering concurrent fields.
         ...(lockedConfig?.emailConfig ?? {}),
         ...(body.replyTo ? { replyTo: body.replyTo.trim() } : {}),
+        ...(body.brandName ? { brandName: body.brandName.trim() } : {}),
         ...(body.templateId ? { templateId: body.templateId.trim() } : {}),
         ...(body.subjectOverride ? { subjectOverride: body.subjectOverride.trim() } : {}),
         ...(body.magicLinkBaseUrl ? { magicLinkBaseUrl: body.magicLinkBaseUrl.trim() } : {}),
@@ -1638,6 +1655,7 @@ platform.patch("/tenants/:tenantId/email-config", async (c) => {
       provider?: "resend";
       from?: string;
       replyTo?: string;
+      brandName?: string;
       templateId?: string;
       subjectOverride?: string;
       hasApiKey: boolean;
@@ -1648,6 +1666,7 @@ platform.patch("/tenants/:tenantId/email-config", async (c) => {
       provider: emailConfig.provider,
       from: emailConfig.from,
       replyTo: emailConfig.replyTo,
+      brandName: emailConfig.brandName,
       templateId: emailConfig.templateId,
       subjectOverride: emailConfig.subjectOverride,
       hasApiKey: Boolean(emailConfig.apiKeyEncrypted),
@@ -1687,6 +1706,7 @@ platform.get("/tenants/:tenantId/email-config", async (c) => {
         provider?: "resend";
         from?: string;
         replyTo?: string;
+        brandName?: string;
         templateId?: string;
         subjectOverride?: string;
         magicLinkBaseUrl?: string;
@@ -1703,6 +1723,7 @@ platform.get("/tenants/:tenantId/email-config", async (c) => {
             provider: emailConfig.provider,
             from: emailConfig.from,
             replyTo: emailConfig.replyTo,
+            brandName: emailConfig.brandName,
             templateId: emailConfig.templateId,
             subjectOverride: emailConfig.subjectOverride,
             magicLinkBaseUrl: emailConfig.magicLinkBaseUrl,
@@ -3883,16 +3904,6 @@ platform.patch("/users/:userId/metadata", async (c) => {
   const metadataError = getPlatformMetadataValidationError(body.customMetadata, "customMetadata");
   if (metadataError) return c.json<ApiResponse>({ ok: false, error: metadataError }, 400);
 
-  await writeAuditEvent({
-    tenantId: PLATFORM_AUDIT_TENANT_ID,
-    actorType: "platform",
-    action: "user.metadata.update.authorized",
-    resourceType: "user",
-    resourceId: userId,
-    metadata: { updatedGlobal: true },
-    ...auditCtx(c),
-  });
-
   const updated = await withPlatformAuthorityDatabase((platformDb) =>
     withTenantAuditedTransactionOnDb(
       platformDb,
@@ -3902,6 +3913,15 @@ platform.patch("/users/:userId/metadata", async (c) => {
         await tx.execute(
           sql`SELECT set_config('steward.tenant_id', ${PLATFORM_AUDIT_TENANT_ID}, true)`,
         );
+        await appendRequiredAudit({
+          tenantId: PLATFORM_AUDIT_TENANT_ID,
+          actorType: "platform",
+          action: "user.metadata.update.authorized",
+          resourceType: "user",
+          resourceId: userId,
+          metadata: { updatedGlobal: true },
+          ...auditCtx(c),
+        });
         const locked = rowsFromExecute<{ id: string }>(
           await tx.execute(sql`SELECT id FROM users WHERE id = ${userId}::uuid FOR UPDATE`),
         )[0];
@@ -3965,9 +3985,7 @@ platform.patch("/users/:userId/deactivate", async (c) => {
         await tx.execute(
           sql`SELECT set_config('steward.tenant_id', ${PLATFORM_AUDIT_TENANT_ID}, true)`,
         );
-        await tx.execute(
-          sql`SELECT pg_advisory_xact_lock(hashtextextended(${"platform_user_account_" + userId}, 0))`,
-        );
+        await lockPlatformUserAccount(tx, userId);
         await lockUserSession(tx, userId);
         await appendRequiredAudit({
           tenantId: PLATFORM_AUDIT_TENANT_ID,
@@ -4055,9 +4073,7 @@ platform.delete("/users/:userId", async (c) => {
         await tx.execute(
           sql`SELECT set_config('steward.tenant_id', ${PLATFORM_AUDIT_TENANT_ID}, true)`,
         );
-        await tx.execute(
-          sql`SELECT pg_advisory_xact_lock(hashtextextended(${"platform_user_account_" + userId}, 0))`,
-        );
+        await lockPlatformUserAccount(tx, userId);
         await appendRequiredAudit({
           tenantId: PLATFORM_AUDIT_TENANT_ID,
           actorType: "platform",
@@ -4118,9 +4134,10 @@ platform.delete("/users/:userId", async (c) => {
   // revocation cache afterward as defense in depth, but never turn an already
   // committed deletion into a misleading 500. Retrying the DELETE is safe.
   await revocationStore.revokeUserTokens(userId, deletionResult).catch((error: unknown) => {
-    console.error("[Platform] Post-delete token cache refresh failed", {
-      errorClass: error instanceof Error ? error.name : typeof error,
-    });
+    console.error(
+      "[Platform] Post-delete token cache refresh failed",
+      redactedThrownDiagnostics(error),
+    );
   });
 
   return c.json<ApiResponse<{ userId: string; deleted: boolean }>>({
@@ -5426,6 +5443,8 @@ platform.delete("/tenants/:id/members/:userId", async (c) => {
   let currentMember: { role: string } | undefined;
   try {
     currentMember = await db.transaction(async (tx) => {
+      await lockPlatformUserAccount(tx, userId);
+      await lockUserSession(tx, userId);
       await lockTenantOwnerLifecycle(tx, tenantId);
       const [current] = await tx
         .select({ role: userTenants.role })
@@ -5467,8 +5486,9 @@ platform.delete("/tenants/:id/members/:userId", async (c) => {
   try {
     deleted = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
       const tx = txRaw as typeof db;
-      await lockTenantOwnerLifecycle(tx, tenantId);
+      await lockPlatformUserAccount(tx, userId);
       await lockUserSession(tx, userId);
+      await lockTenantOwnerLifecycle(tx, tenantId);
       const [current] = await tx
         .select({ role: userTenants.role })
         .from(userTenants)
@@ -5557,6 +5577,8 @@ platform.patch("/tenants/:id/members/:userId", async (c) => {
   let currentMember: { role: string } | undefined;
   try {
     currentMember = await db.transaction(async (tx) => {
+      await lockPlatformUserAccount(tx, userId);
+      await lockUserSession(tx, userId);
       await lockTenantOwnerLifecycle(tx, tenantId);
       const [current] = await tx
         .select({ role: userTenants.role })
@@ -5601,6 +5623,8 @@ platform.patch("/tenants/:id/members/:userId", async (c) => {
   try {
     updated = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
       const tx = txRaw as typeof db;
+      await lockPlatformUserAccount(tx, userId);
+      await lockUserSession(tx, userId);
       await lockTenantOwnerLifecycle(tx, tenantId);
       const [current] = await tx
         .select({ role: userTenants.role })

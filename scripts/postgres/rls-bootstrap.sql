@@ -303,7 +303,12 @@ WHERE n.nspname = 'drizzle'
   AND c.relkind IN ('r', 'p')
   AND c.relname LIKE '__drizzle_migrations_plugin\_%' ESCAPE '\'
 ORDER BY c.relname \gexec
-SELECT format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA steward_bootstrap, steward_rls TO %I', :'steward_app_role') \gexec
+-- Normalize to a closed function ACL inside this transaction before granting
+-- the checked-in application allowlist below. Future definers remain denied.
+SELECT format(
+  'REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA steward_bootstrap, steward_rls FROM %I',
+  :'steward_app_role'
+) \gexec
 SELECT format(
   'GRANT EXECUTE ON FUNCTION '
   'steward_rls.tenant_id(), steward_rls.user_id(), '
@@ -332,6 +337,12 @@ SELECT format(
   'GRANT EXECUTE ON FUNCTION steward_bootstrap.user_token_revocation_subject(uuid) TO %I',
   :'steward_app_role'
 ) WHERE to_regprocedure('steward_bootstrap.user_token_revocation_subject(uuid)') IS NOT NULL \gexec
+SELECT format(
+  'GRANT EXECUTE ON FUNCTION steward_bootstrap.tenant_set_user_deactivation(text,uuid,uuid,boolean) TO %I',
+  :'steward_app_role'
+) WHERE to_regprocedure(
+  'steward_bootstrap.tenant_set_user_deactivation(text,uuid,uuid,boolean)'
+) IS NOT NULL \gexec
 SELECT format(
   'GRANT EXECUTE ON FUNCTION public.steward_lock_tenant_deletion(text) TO %I, %I',
   :'steward_app_role', :'steward_bootstrap_role'
@@ -435,6 +446,10 @@ SELECT format(
 ) \gexec
 SELECT format(
   'GRANT SELECT ON public.users, public.user_tenants TO %I',
+  :'steward_platform_role'
+) \gexec
+SELECT format(
+  'GRANT UPDATE (custom_metadata, updated_at) ON public.users TO %I',
   :'steward_platform_role'
 ) \gexec
 SELECT format(
@@ -971,6 +986,18 @@ BEGIN
     'public.users:SELECT:false'
   ] THEN
     RAISE EXCEPTION 'SEC-169 platform relation ACL drift';
+  END IF;
+  IF NOT has_column_privilege(
+      current_setting('steward.bootstrap.platform_role'),
+      'public.users', 'custom_metadata', 'UPDATE'
+    ) OR NOT has_column_privilege(
+      current_setting('steward.bootstrap.platform_role'),
+      'public.users', 'updated_at', 'UPDATE'
+    ) OR has_column_privilege(
+      current_setting('steward.bootstrap.platform_role'),
+      'public.users', 'email', 'UPDATE'
+    ) THEN
+    RAISE EXCEPTION 'SEC-169 platform user metadata column ACL drift';
   END IF;
   IF (
     SELECT array_agg(

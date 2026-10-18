@@ -126,6 +126,41 @@ export function hasPlatformScope(scopes: readonly string[] | undefined, required
   );
 }
 
+export type PlatformKeyAuthorization =
+  | { ok: true; keyHash: string; scopes: string[] }
+  | { ok: false; status: 403 | 500; error: string };
+
+/**
+ * Authenticate a platform key and resolve its deny-by-default authority in one
+ * operation. Callers with specialized routing needs (such as operator recovery)
+ * can require a narrow scope without duplicating the scope parser or leaking
+ * malformed configuration details.
+ */
+export function authorizePlatformKey(
+  key: string,
+  requiredScope?: string,
+): PlatformKeyAuthorization {
+  if (!isValidPlatformKey(key)) {
+    return { ok: false, status: 403, error: "Invalid platform key" };
+  }
+
+  let scopes: string[];
+  try {
+    scopes = getPlatformKeyScopes(key);
+  } catch (error) {
+    if (error instanceof PlatformKeyScopesConfigurationError) {
+      return { ok: false, status: 500, error: PLATFORM_SCOPE_CONFIG_ERROR };
+    }
+    throw error;
+  }
+
+  if (requiredScope && !hasPlatformScope(scopes, requiredScope)) {
+    return { ok: false, status: 403, error: "Forbidden" };
+  }
+
+  return { ok: true, keyHash: hashKey(key).toString("hex"), scopes };
+}
+
 /**
  * Hono middleware that enforces platform key authentication.
  * Mount this on any route group that requires platform-level access.
@@ -159,22 +194,13 @@ export function platformAuthMiddleware() {
       );
     }
 
-    if (!isValidPlatformKey(key)) {
-      return c.json<ApiResponse>({ ok: false, error: "Invalid platform key" }, 403);
+    const authorization = authorizePlatformKey(key);
+    if (!authorization.ok) {
+      return c.json<ApiResponse>({ ok: false, error: authorization.error }, authorization.status);
     }
 
-    let scopes: string[];
-    try {
-      scopes = getPlatformKeyScopes(key);
-    } catch (error) {
-      if (error instanceof PlatformKeyScopesConfigurationError) {
-        return c.json<ApiResponse>({ ok: false, error: PLATFORM_SCOPE_CONFIG_ERROR }, 500);
-      }
-      throw error;
-    }
-
-    c.set("platformKeyHash", hashKey(key).toString("hex"));
-    c.set("platformScopes", scopes);
+    c.set("platformKeyHash", authorization.keyHash);
+    c.set("platformScopes", authorization.scopes);
 
     await next();
   });

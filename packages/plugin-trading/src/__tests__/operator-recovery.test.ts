@@ -12,6 +12,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it, mock, setDefaultTimeout } from "bun:test";
+import { createHash } from "node:crypto";
 import {
   agents,
   agentWallets,
@@ -23,6 +24,7 @@ import {
   writeAuditEvent,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import type { IoredisLike } from "@stwd/redis";
 import { and, asc, eq, inArray } from "drizzle-orm";
 import { Hono } from "hono";
 import { z } from "zod";
@@ -30,6 +32,7 @@ import { verifyAuditChain } from "../../../api/src/services/audit";
 import type { StewardAppContext } from "../context";
 
 const PLATFORM_KEY = "stw_platform_test_operator_key";
+const PLATFORM_KEY_ACTOR = `platform-key:${createHash("sha256").update(PLATFORM_KEY).digest("hex")}`;
 setDefaultTimeout(30_000);
 
 // ── Mock the Hyperliquid adapter (no signing / no network) ─────────────────────
@@ -54,16 +57,6 @@ let closeAllPause: Promise<void> | null = null;
 const adapterVaultClients: Array<{
   signTypedData: (input: Record<string, unknown>) => Promise<string>;
 }> = [];
-
-mock.module("@stwd/policy-engine", () => ({
-  aggregationLookupFromMap: () => undefined,
-  aggregationQueriesForPolicies: () => [],
-  aggregationQueryKey: () => "unused",
-  assetAllowlistEvaluator: () => ({ passed: true }),
-  evaluateTradeOrder: () => ({ approved: true, results: [] }),
-  tradeLeverageCapEvaluator: () => ({ passed: true }),
-  tradeVenueAllowlistEvaluator: () => ({ passed: true }),
-}));
 
 class MockHyperliquidAdapter {
   constructor(
@@ -245,13 +238,14 @@ async function buildApp(ctxOverrides: Partial<StewardAppContext> = {}) {
     const tenantId = c.req.header("X-Steward-Tenant") || "default";
     c.set("tenantId", tenantId);
     c.set("authType", "platform");
+    c.set("platformKeyHash", createHash("sha256").update(PLATFORM_KEY).digest("hex"));
     return next();
   });
   app.route("/v1/trade", createOperatorRecoveryRoutes({ ...testCtx(), ...ctxOverrides }));
   return app;
 }
 
-async function buildTransferApp(failAuditAction?: string) {
+async function buildTransferApp(failAuditAction?: string, redisClient?: IoredisLike) {
   const { tradingPlugin } = await import("../index");
   const baseWriteAuditEvent = writeAuditEvent;
   const app = new Hono();
@@ -280,7 +274,7 @@ async function buildTransferApp(failAuditAction?: string) {
       await baseWriteAuditEvent(event);
     },
     verifyAuditChain,
-    getRedisClient: () => null,
+    getRedisClient: () => redisClient ?? null,
     requireAgentJwt: async (_c: unknown, next: () => Promise<void>) => next(),
     tenantAuth: async (_c: unknown, next: () => Promise<void>) => next(),
     operatorAuth: async (
@@ -294,6 +288,7 @@ async function buildTransferApp(failAuditAction?: string) {
       c.set("tenantId", c.req.header("X-Steward-Tenant") || "default");
       if (c.req.header("X-Steward-Platform-Key") === PLATFORM_KEY) {
         c.set("authType", "platform");
+        c.set("platformKeyHash", createHash("sha256").update(PLATFORM_KEY).digest("hex"));
         return next();
       }
       if (c.req.header("X-Steward-Key")) c.set("authType", "api-key");
@@ -311,6 +306,52 @@ async function buildTransferApp(failAuditAction?: string) {
   } as never;
   tradingPlugin.register(app as never, ctx);
   return app;
+}
+
+function createTransferRedisDouble(): {
+  client: IoredisLike;
+  seedCompleted: (scope: string, key: string, body: unknown, record: unknown) => void;
+} {
+  const data = new Map<string, string>();
+  const client = {
+    get: async (key: string) => data.get(key) ?? null,
+    set: async (...args: unknown[]) => {
+      const [key, value, mode, , condition] = args as [string, string, string?, number?, string?];
+      if (mode === "PX" && condition === "NX" && data.has(key)) return null;
+      data.set(key, value);
+      return "OK";
+    },
+    eval: async (
+      script: string,
+      _numKeys: number,
+      key: string,
+      claimToken: string,
+      ...args: unknown[]
+    ) => {
+      const raw = data.get(key);
+      if (!raw) return 0;
+      const current = JSON.parse(raw) as { state?: string; claimToken?: string };
+      if (current.state !== "pending" || current.claimToken !== claimToken) return 0;
+      if (script.includes('redis.call("DEL"')) data.delete(key);
+      else data.set(key, args[0] as string);
+      return 1;
+    },
+  } as unknown as IoredisLike;
+  return {
+    client,
+    seedCompleted(scope, key, body, record) {
+      const storageKey = createHash("sha256")
+        .update(`${scope.length}:${scope}${key.length}:${key}`, "utf8")
+        .digest("hex");
+      // DurableIdempotencyStore names this field bodyHash for compatibility,
+      // but its current wire contract stores the canonical JSON commitment.
+      const bodyHash = JSON.stringify(body);
+      data.set(
+        `idempotency:trade:operator:${storageKey}`,
+        JSON.stringify({ state: "completed", bodyHash, record }),
+      );
+    },
+  };
 }
 
 function resetSendAssetMock(): void {
@@ -485,7 +526,7 @@ describe("mounted HIP-3 collateral transfer", () => {
       expect.objectContaining({
         action: "trade.recovery.transfer.requested",
         actorType: "platform",
-        actorId: "platform-operator",
+        actorId: PLATFORM_KEY_ACTOR,
         resourceType: "trade",
         resourceId: agentId,
         metadata: expect.objectContaining({
@@ -498,7 +539,7 @@ describe("mounted HIP-3 collateral transfer", () => {
       expect.objectContaining({
         action: "trade.recovery.transfer.submitted",
         actorType: "platform",
-        actorId: "platform-operator",
+        actorId: PLATFORM_KEY_ACTOR,
         resourceType: "trade",
         resourceId: agentId,
         metadata: expect.objectContaining({
@@ -608,26 +649,31 @@ describe("mounted HIP-3 collateral transfer", () => {
     expect(JSON.stringify(ambiguousAudits)).not.toContain("transport lost after write");
   });
 
-  it("replays terminal success when the completion audit fails after venue submission", async () => {
+  it("lets durable ambiguity override stale Redis success after completion-audit failure", async () => {
     resetSendAssetMock();
     const tenantId = `tenant-transfer-audit-${Date.now()}`;
     const agentId = `agent-transfer-audit-${Date.now()}`;
     await seedAgent({ tenantId, agentId });
-    const app = await buildTransferApp("trade.recovery.transfer.submitted");
+    const redis = createTransferRedisDouble();
+    const app = await buildTransferApp("trade.recovery.transfer.submitted", redis.client);
     const request = () =>
       transferRequest(app, tenantId, agentId, { idempotencyKey: "completion-audit-failure" });
 
     const first = await request();
     const retry = await request();
     expect(first.status).toBe(200);
-    expect(retry.status).toBe(200);
-    expect(await retry.json()).toEqual(await first.json());
+    expect(retry.status).toBe(409);
+    expect(retry.headers.get("Retry-After")).toBe("60");
+    expect(await retry.json()).toEqual({
+      ok: false,
+      error: "Collateral transfer outcome requires reconciliation",
+    });
     expect(signSendAssetCalls).toHaveLength(1);
     expect(submitSendAssetCalls).toHaveLength(1);
     expect(await transferAuditActions(tenantId, agentId)).toEqual([
       "trade.recovery.transfer.requested",
     ]);
-    const coldReplayApp = await buildTransferApp("trade.recovery.transfer.submitted");
+    const coldReplayApp = await buildTransferApp("trade.recovery.transfer.submitted", redis.client);
     const coldReplay = await transferRequest(coldReplayApp, tenantId, agentId, {
       idempotencyKey: "completion-audit-failure",
     });
@@ -638,6 +684,42 @@ describe("mounted HIP-3 collateral transfer", () => {
       error: "Collateral transfer outcome requires reconciliation",
     });
     expect(submitSendAssetCalls).toHaveLength(1);
+  });
+
+  it("does not treat Redis success as authoritative when durable evidence is absent", async () => {
+    resetSendAssetMock();
+    const tenantId = `tenant-transfer-cache-only-${Date.now()}`;
+    const agentId = `agent-transfer-cache-only-${Date.now()}`;
+    await seedAgent({ tenantId, agentId });
+    const idempotencyKey = "cache-only-success";
+    const requestCommitment = {
+      agentId,
+      venue: "hyperliquid",
+      sourceDex: "xyz",
+      destinationDex: "",
+      amount: "12500000",
+      token: null,
+    };
+    const redis = createTransferRedisDouble();
+    redis.seedCompleted(`${tenantId}:transfer`, idempotencyKey, requestCommitment, {
+      status: 200,
+      body: { ok: true, data: { stale: true } },
+    });
+
+    const response = await transferRequest(
+      await buildTransferApp(undefined, redis.client),
+      tenantId,
+      agentId,
+      { idempotencyKey },
+    );
+    expect(response.status).toBe(409);
+    expect(response.headers.get("Retry-After")).toBe("60");
+    expect(await response.json()).toEqual({
+      ok: false,
+      error: "Collateral transfer replay evidence requires reconciliation",
+    });
+    expect(signSendAssetCalls).toHaveLength(0);
+    expect(submitSendAssetCalls).toHaveLength(0);
   });
 
   it("fails closed instead of replaying tampered durable audit evidence", async () => {
@@ -1010,6 +1092,46 @@ describe("operator recovery add-margin", () => {
     expect(body.data.amountUsdc).toBe("25.5");
     expect(body.data.amountBaseUnits).toBe("25500000");
     expect(addIsolatedMarginCalls).toEqual([{ coin: "xyz:SPCX", amountUsdc: "25.5" }]);
+  });
+});
+
+describe("operator recovery deposit wallet binding", () => {
+  it("passes the resolved venue wallet assertion into transaction signing", async () => {
+    const tenantId = `tenant-deposit-wallet-${crypto.randomUUID()}`;
+    const agentId = `agent-deposit-wallet-${crypto.randomUUID()}`;
+    const walletAddress = "0x00000000000000000000000000000000000000bb";
+    await seedAgent({ tenantId, agentId });
+    const signedInputs: Array<Record<string, unknown>> = [];
+    const app = await buildApp({
+      vault: {
+        getWallet: async () => ({ address: walletAddress }),
+        signTransaction: async (input: Record<string, unknown>) => {
+          signedInputs.push(input);
+          return `0x${"1".repeat(64)}`;
+        },
+      } as unknown as StewardAppContext["vault"],
+    });
+
+    const response = await app.request("/v1/trade/hyperliquid/deposit", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Steward-Platform-Key": PLATFORM_KEY,
+        "X-Steward-Tenant": tenantId,
+        "Idempotency-Key": crypto.randomUUID(),
+      },
+      body: JSON.stringify({ agentId, amount: "5" }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(signedInputs).toHaveLength(1);
+    expect(signedInputs[0]).toMatchObject({
+      tenantId,
+      agentId,
+      venue: "hyperliquid",
+      walletAddress,
+      broadcast: true,
+    });
   });
 });
 

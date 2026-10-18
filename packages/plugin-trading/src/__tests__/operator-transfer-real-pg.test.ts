@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   agents,
   agentWallets,
@@ -19,6 +19,7 @@ import { z } from "zod";
 import { verifyAuditChain } from "../../../api/src/services/audit";
 
 const PLATFORM_KEY = "stw_platform_real_pg_transfer";
+const PLATFORM_KEY_HASH = createHash("sha256").update(PLATFORM_KEY).digest("hex");
 const HAS_REAL_PG =
   Boolean(process.env.DATABASE_URL) && process.env.STEWARD_PGLITE_MEMORY !== "true";
 const submitCalls: unknown[] = [];
@@ -134,6 +135,7 @@ async function buildApp(failAuditAction?: string, routeDb = getDb(), expectedTen
         return c.json({ ok: false, error: "Invalid platform key" }, 403);
       }
       c.set("authType", "platform");
+      c.set("platformKeyHash", PLATFORM_KEY_HASH);
       return next();
     },
   } as never;

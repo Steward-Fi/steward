@@ -342,12 +342,88 @@ describeWithPostgres("migration target inventory (real Postgres)", () => {
       await target.client`DROP TABLE drizzle.__drizzle_migrations_plugin_capabilities`;
       const pluginMigrated = await runCapabilitiesMigrator(target.url);
       expect(pluginMigrated.exitCode, pluginMigrated.stderr || pluginMigrated.stdout).toBe(0);
+      const reconciliationEntry = pluginLedgerEntries("capabilities").at(-1)!;
+      await target.client`
+        DELETE FROM drizzle.__drizzle_migrations_plugin_capabilities
+        WHERE hash = ${reconciliationEntry.hash}
+          AND created_at = ${reconciliationEntry.createdAt}
+      `;
+      const old0005FourPolicyPrefix = await runMigrator(target.url);
+      expect(
+        old0005FourPolicyPrefix.exitCode,
+        old0005FourPolicyPrefix.stderr || old0005FourPolicyPrefix.stdout,
+      ).toBe(0);
+      await target.client`
+        DO $$
+        DECLARE relation_name text;
+        BEGIN
+          FOREACH relation_name IN ARRAY ARRAY[
+            'capabilities', 'capability_grants', 'capability_invocations',
+            'capability_rate_limit_buckets'
+          ] LOOP
+            EXECUTE format(
+              'DROP POLICY steward_migration_maintenance ON public.%I', relation_name
+            );
+          END LOOP;
+        END
+        $$
+      `;
+      const old0005ZeroPolicyPrefix = await runMigrator(target.url);
+      expect(
+        old0005ZeroPolicyPrefix.exitCode,
+        old0005ZeroPolicyPrefix.stderr || old0005ZeroPolicyPrefix.stdout,
+      ).toBe(0);
+      await target.client`
+        DO $$
+        DECLARE relation_name text;
+        BEGIN
+          FOREACH relation_name IN ARRAY ARRAY[
+            'capabilities', 'capability_grants', 'capability_invocations',
+            'capability_rate_limit_buckets'
+          ] LOOP
+            EXECUTE format(
+              'CREATE POLICY steward_migration_maintenance ON public.%I FOR ALL TO %I USING (true) WITH CHECK (true)',
+              relation_name, current_user
+            );
+          END LOOP;
+        END
+        $$
+      `;
+      await target.client`
+        INSERT INTO drizzle.__drizzle_migrations_plugin_capabilities(hash, created_at)
+        VALUES (${reconciliationEntry.hash}, ${reconciliationEntry.createdAt})
+      `;
       await target.client`
         DROP POLICY steward_tenant_isolation ON public.capability_invocations
       `;
 
       const missingSecurityPolicy = await runMigrator(target.url);
       expect(missingSecurityPolicy.exitCode).not.toBe(0);
+      await target.client`
+        CREATE POLICY steward_tenant_isolation ON public.capability_invocations
+          USING (tenant_id = steward_rls.tenant_id())
+          WITH CHECK (tenant_id = steward_rls.tenant_id())
+      `;
+
+      await target.client`
+        DROP POLICY steward_migration_maintenance ON public.capabilities
+      `;
+      await target.client`
+        CREATE POLICY steward_migration_maintenance ON public.capabilities
+          FOR ALL TO PUBLIC USING (true) WITH CHECK (true)
+      `;
+      const hostilePublicMaintenancePolicy = await runMigrator(target.url);
+      expect(hostilePublicMaintenancePolicy.exitCode).not.toBe(0);
+
+      await target.client`
+        DROP POLICY steward_migration_maintenance ON public.capabilities
+      `;
+      await target.client`
+        CREATE POLICY steward_migration_maintenance ON public.capabilities
+          FOR ALL TO CURRENT_USER USING (false) WITH CHECK (true)
+      `;
+      const hostileWrongMaintenanceDefinition = await runMigrator(target.url);
+      expect(hostileWrongMaintenanceDefinition.exitCode).not.toBe(0);
     } finally {
       await target.client.end({ timeout: 5 });
     }
