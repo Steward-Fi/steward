@@ -1,5 +1,5 @@
 # Build and push Docker image to GitHub Container Registry (GHCR)
-# Triggers on pushes to develop + main branches and version tags (v*)
+# Builds every pull request and publishes pushes to develop/main or version tags (v*).
 #   develop -> :develop image (auto-deployed to STAGING by deploy-staging.yml)
 #   main    -> :main image (promoted to PRODUCTION manually via deploy-railway.yml)
 #   v*      -> :<semver> image (tagged release for production)
